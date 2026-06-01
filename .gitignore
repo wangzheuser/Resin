@@ -4,7 +4,12 @@ sing-box-reference
 .devcontainer
 start-instance.sh
 
+# Environment variables (contains secrets)
+.env
+
 # Claude Code / OMC tooling and local runtime data
 .claude/
 .omc/
 .local/
+.setting/
+AGENTS.md
