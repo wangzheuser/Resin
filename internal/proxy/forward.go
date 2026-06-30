@@ -20,6 +20,8 @@ import (
 type ForwardProxyConfig struct {
 	ProxyToken        string
 	AuthVersion       string
+	FixedPlatformName string
+	FixedAccount      string
 	Router            *routing.Router
 	Pool              outbound.PoolAccessor
 	Health            HealthRecorder
@@ -35,6 +37,8 @@ type ForwardProxyConfig struct {
 type ForwardProxy struct {
 	token             string
 	authVersion       config.AuthVersion
+	fixedPlatformName string
+	fixedAccount      string
 	router            *routing.Router
 	pool              outbound.PoolAccessor
 	health            HealthRecorder
@@ -64,16 +68,18 @@ func NewForwardProxy(cfg ForwardProxyConfig) *ForwardProxy {
 		authVersion = config.AuthVersionLegacyV0
 	}
 	return &ForwardProxy{
-		token:           cfg.ProxyToken,
-		authVersion:     authVersion,
-		router:          cfg.Router,
-		pool:            cfg.Pool,
-		health:          cfg.Health,
-		events:          ev,
-		metricsSink:     cfg.MetricsSink,
-		transportConfig: transportCfg,
-		transportPool:   transportPool,
-		bypass:          NewTargetBypassMatcher(cfg.ProxyBypassRules),
+		token:             cfg.ProxyToken,
+		authVersion:       authVersion,
+		fixedPlatformName: cfg.FixedPlatformName,
+		fixedAccount:      cfg.FixedAccount,
+		router:            cfg.Router,
+		pool:              cfg.Pool,
+		health:            cfg.Health,
+		events:            ev,
+		metricsSink:       cfg.MetricsSink,
+		transportConfig:   transportCfg,
+		transportPool:     transportPool,
+		bypass:            NewTargetBypassMatcher(cfg.ProxyBypassRules),
 	}
 }
 
@@ -113,6 +119,9 @@ func (p *ForwardProxy) effectiveAuthVersion() config.AuthVersion {
 
 // authenticate parses Proxy-Authorization and returns (platformName, account, error).
 func (p *ForwardProxy) authenticate(r *http.Request) (string, string, *ProxyError) {
+	if p.fixedPlatformName != "" || p.fixedAccount != "" {
+		return p.fixedPlatformName, p.fixedAccount, nil
+	}
 	if p.effectiveAuthVersion() == config.AuthVersionV1 {
 		return p.authenticateV1(r)
 	}

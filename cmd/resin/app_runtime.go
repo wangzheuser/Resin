@@ -44,8 +44,9 @@ type resinApp struct {
 		Serve(net.Listener) error
 		Shutdown(context.Context) error
 	}
-	inboundLn     net.Listener
-	transportPool *proxy.OutboundTransportPool
+	inboundLn           net.Listener
+	transportPool       *proxy.OutboundTransportPool
+	proxySessionManager *proxy.ProxySessionManager
 }
 
 func run() error {
@@ -390,12 +391,6 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 		a.requestlogRepo,
 		a.metricsManager,
 	)
-	tokenActionHandler := api.NewTokenActionHandler(
-		a.envCfg.ProxyToken,
-		cpService,
-		int64(a.envCfg.APIMaxBodyBytes),
-	)
-
 	proxyEvents := a.buildProxyEvents()
 	outboundTransportCfg := proxy.OutboundTransportConfig{
 		MaxIdleConns:        a.envCfg.ProxyTransportMaxIdleConns,
@@ -405,6 +400,24 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 	if a.transportPool == nil {
 		a.transportPool = proxy.NewOutboundTransportPool(outboundTransportCfg)
 	}
+
+	a.proxySessionManager = proxy.NewProxySessionManager(proxy.ProxySessionManagerConfig{
+		Router:            a.topoRuntime.router,
+		Pool:              a.topoRuntime.pool,
+		Health:            a.topoRuntime.pool,
+		Events:            proxyEvents,
+		MetricsSink:       a.metricsManager,
+		OutboundTransport: outboundTransportCfg,
+		TransportPool:     a.transportPool,
+		ProxyBypassRules:  a.envCfg.ProxyBypassRules,
+	})
+
+	tokenActionHandler := api.NewTokenActionHandlerWithProxySessions(
+		a.envCfg.ProxyToken,
+		cpService,
+		a.proxySessionManager,
+		int64(a.envCfg.APIMaxBodyBytes),
+	)
 
 	forwardProxy := proxy.NewForwardProxy(proxy.ForwardProxyConfig{
 		ProxyToken:        a.envCfg.ProxyToken,
@@ -540,6 +553,10 @@ func (a *resinApp) shutdown(ctx context.Context) {
 		log.Printf("Server shutdown error: %v", err)
 	}
 	log.Println("Resin server stopped")
+	if a.proxySessionManager != nil {
+		a.proxySessionManager.Close()
+		log.Println("Proxy session manager stopped")
+	}
 	if a.transportPool != nil {
 		a.transportPool.CloseAll()
 		log.Println("Outbound transport pool closed")
