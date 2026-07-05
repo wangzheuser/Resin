@@ -93,6 +93,8 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "区域": "Region",
   "流量": "Traffic",
   "耗时": "Latency",
+  "首字耗时": "TTFB",
+  "总耗时": "Total Latency",
   "时间": "Time",
   "开始时间": "Start Time",
   "结束时间": "End Time",
