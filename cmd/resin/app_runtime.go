@@ -27,6 +27,7 @@ import (
 	"github.com/Resinat/Resin/internal/routing"
 	"github.com/Resinat/Resin/internal/service"
 	"github.com/Resinat/Resin/internal/state"
+	"github.com/joho/godotenv"
 )
 
 type resinApp struct {
@@ -49,6 +50,10 @@ type resinApp struct {
 }
 
 func run() error {
+	if err := loadDotenvFile(".env"); err != nil {
+		return err
+	}
+
 	envCfg, err := config.LoadEnvConfig()
 	if err != nil {
 		return err
@@ -81,6 +86,16 @@ func run() error {
 	}
 	if runtimeErr != nil {
 		return fmt.Errorf("runtime server error: %w", runtimeErr)
+	}
+	return nil
+}
+
+func loadDotenvFile(path string) error {
+	if err := godotenv.Load(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("load %s: %w", path, err)
 	}
 	return nil
 }

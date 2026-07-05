@@ -44,6 +44,9 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "重置中...": "Resetting...",
   "清除中...": "Clearing...",
   "清除所有租约": "Clear All Leases",
+  "释放租约": "Release Lease",
+  "释放中...": "Releasing...",
+  "释放账号 {{account}} 的租约": "Release lease for account {{account}}",
   "重建路由池": "Rebuild Routing Pool",
   "重建中...": "Rebuilding...",
   "重置为默认配置": "Reset to Defaults",
@@ -98,6 +101,8 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "时间": "Time",
   "开始时间": "Start Time",
   "结束时间": "End Time",
+  "过期时间": "Expires At",
+  "最后访问": "Last Accessed",
   "名称": "Name",
   "节点名": "Node Name",
   "节点": "Node",
@@ -589,6 +594,11 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "暂无请求统计数据": "No request statistics data",
   "暂无租约生命周期数据": "No lease lifecycle data",
   "暂无租约实时数据": "No realtime lease data",
+  "租约管理": "Lease Management",
+  "查看当前平台的租约绑定，并按账号释放单个租约。":
+    "View current lease bindings for this platform and release individual account leases.",
+  "正在加载租约数据...": "Loading leases...",
+  "当前平台暂无租约": "No leases for this platform",
   "重置、清租约、删除操作": "Reset, clear leases, and delete operations",
   "重建、重置、清租约、删除操作": "Rebuild, reset, clear leases, and delete operations",
   "立即清除当前平台的全部租约，下次请求将重新分配出口。":
@@ -647,6 +657,7 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "平台 {{name}} 已完成节点池重建": "Platform {{name}} node pool rebuilt",
   "平台 {{name}} 已重置为默认配置": "Platform {{name}} reset to defaults",
   "平台 {{name}} 的所有租约已清除": "All leases for platform {{name}} cleared",
+  "账号 {{account}} 的租约已释放": "Lease for account {{account}} released",
   "请求日志详情 {{id}}": "Request log details {{id}}",
   "确认立即清理订阅 {{name}} 中的熔断或异常节点？":
     "Clean circuit-open or failed nodes in subscription {{name}} now?",
@@ -657,6 +668,7 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
     "Delete platform {{name}}? This action cannot be undone.",
   "确认清除平台 {{name}} 的所有租约？":
     "Clear all leases for platform {{name}}?",
+  "确认释放账号 {{account}} 的租约？": "Release lease for account {{account}}?",
   "入站": "Inbound",
   "上传": "Upload",
   "下载": "Download",

@@ -1,5 +1,12 @@
 import { apiRequest } from "../../lib/api-client";
-import type { PageResponse, Platform, PlatformCreateInput, PlatformUpdateInput } from "./types";
+import type {
+  ListPlatformLeasesInput,
+  PageResponse,
+  Platform,
+  PlatformCreateInput,
+  PlatformLease,
+  PlatformUpdateInput,
+} from "./types";
 
 const basePath = "/api/v1/platforms";
 
@@ -12,6 +19,8 @@ type ApiPlatform = Omit<Platform, "regex_filters" | "region_filters"> & {
   reverse_proxy_fixed_account_header?: string | null;
   passive_circuit_breaker_disabled?: boolean | null;
 };
+
+type ApiPlatformLease = Partial<PlatformLease>;
 
 function parseMissAction(raw: ApiPlatform["reverse_proxy_miss_action"]): Platform["reverse_proxy_miss_action"] {
   if (raw === "TREAT_AS_EMPTY" || raw === "REJECT") {
@@ -44,6 +53,25 @@ function normalizePlatformPage(raw: PageResponse<ApiPlatform>): PageResponse<Pla
   return {
     ...raw,
     items: raw.items.map(normalizePlatform),
+  };
+}
+
+function normalizeLease(raw: ApiPlatformLease): PlatformLease {
+  return {
+    platform_id: typeof raw.platform_id === "string" ? raw.platform_id : "",
+    account: typeof raw.account === "string" ? raw.account : "",
+    node_hash: typeof raw.node_hash === "string" ? raw.node_hash : "",
+    node_tag: typeof raw.node_tag === "string" ? raw.node_tag : "",
+    egress_ip: typeof raw.egress_ip === "string" ? raw.egress_ip : "",
+    expiry: typeof raw.expiry === "string" ? raw.expiry : "",
+    last_accessed: typeof raw.last_accessed === "string" ? raw.last_accessed : "",
+  };
+}
+
+function normalizeLeasePage(raw: PageResponse<ApiPlatformLease>): PageResponse<PlatformLease> {
+  return {
+    ...raw,
+    items: raw.items.map(normalizeLease),
   };
 }
 
@@ -106,6 +134,32 @@ export async function resetPlatform(id: string): Promise<Platform> {
 export async function rebuildPlatform(id: string): Promise<void> {
   await apiRequest<{ status: "ok" }>(`${basePath}/${id}/actions/rebuild-routable-view`, {
     method: "POST",
+  });
+}
+
+export async function listPlatformLeases(id: string, input: ListPlatformLeasesInput = {}): Promise<PageResponse<PlatformLease>> {
+  const query = new URLSearchParams({
+    limit: String(input.limit ?? 50),
+    offset: String(input.offset ?? 0),
+    sort_by: input.sort_by ?? "expiry",
+    sort_order: input.sort_order ?? "asc",
+  });
+
+  const account = input.account?.trim();
+  if (account) {
+    query.set("account", account);
+  }
+  if (input.fuzzy !== undefined) {
+    query.set("fuzzy", String(input.fuzzy));
+  }
+
+  const data = await apiRequest<PageResponse<ApiPlatformLease>>(`${basePath}/${id}/leases?${query.toString()}`);
+  return normalizeLeasePage(data);
+}
+
+export async function deletePlatformLease(id: string, account: string): Promise<void> {
+  await apiRequest<void>(`${basePath}/${id}/leases/${encodeURIComponent(account)}`, {
+    method: "DELETE",
   });
 }
 
