@@ -12,6 +12,8 @@ services:
       RESIN_PROXY_TOKEN: ${RESIN_PROXY_TOKEN}
       RESIN_LISTEN_ADDRESS: 0.0.0.0
       RESIN_PORT: ${RESIN_PORT}
+      # 默认平台粘性会话 TTL，从 .env 读取；未设置时回退到 168h（与程序内置默认一致）
+      RESIN_DEFAULT_PLATFORM_STICKY_TTL: ${RESIN_DEFAULT_PLATFORM_STICKY_TTL:-168h}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
       - "${RESIN_PORT}:${RESIN_PORT}"
