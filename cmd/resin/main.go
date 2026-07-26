@@ -275,7 +275,7 @@ func newTopologyRuntime(
 	if err != nil {
 		return nil, fmt.Errorf("singbox builder: %w", err)
 	}
-	outboundMgr := outbound.NewOutboundManager(pool, singboxBuilder)
+	outboundMgr := outbound.NewOutboundManager(pool, outbound.NewHybridBuilder(singboxBuilder))
 
 	probeMgr := probe.NewProbeManager(probe.ProbeConfig{
 		Pool:        pool,

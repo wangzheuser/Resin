@@ -662,6 +662,70 @@ func TestParseGeneralSubscription_ClashJSON_V2RayExtendedTransports(t *testing.T
 	}
 }
 
+func TestParseGeneralSubscription_ClashJSON_VLESSXHTTP(t *testing.T) {
+	data := []byte(`{
+		"proxies": [{
+			"name": "vless-xhttp",
+			"type": "vless",
+			"server": "example.com",
+			"port": 443,
+			"uuid": "00000000-0000-0000-0000-000000000015",
+			"flow": "xtls-rprx-vision",
+			"encryption": "mlkem768x25519plus.native.0rtt.100-111-1111.75-0-111.50-0-3333.44h-AOrD2oz2uOMssTdsXsdi5lqQFh9xtNeIVqU7mWA",
+			"network": "xhttp",
+			"udp": true,
+			"tls": true,
+			"servername": "tls.example.com",
+			"client-fingerprint": "firefox",
+			"alpn": ["h2"],
+			"xhttp-opts": {
+				"path": "/zones",
+				"host": "tls.example.com",
+				"mode": "stream-up",
+				"no-grpc-header": false,
+				"x-padding-bytes": "100-1000",
+				"sc-max-each-post-bytes": "1000000",
+				"sc-min-posts-interval-ms": "5",
+				"xmux": {
+					"max-concurrency": "1",
+					"max-connections": "0",
+					"h-keep-alive-period": 0
+				}
+			}
+		}]
+	}`)
+
+	nodes, err := ParseGeneralSubscription(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 parsed node, got %d", len(nodes))
+	}
+
+	parsed := parseNodeRaw(t, nodes[0].RawOptions)
+	if got := parsed["encryption"]; got == nil || got == "" {
+		t.Fatalf("encryption: got %v", got)
+	}
+	if got := parsed["udp"]; got != true {
+		t.Fatalf("udp: got %v", got)
+	}
+	transport := mustMapField(t, parsed, "transport")
+	if got := transport["type"]; got != "xhttp" {
+		t.Fatalf("transport.type: got %v", got)
+	}
+	if got := transport["mode"]; got != "stream-up" {
+		t.Fatalf("transport.mode: got %v", got)
+	}
+	if got := transport["x_padding_bytes"]; got != "100-1000" {
+		t.Fatalf("transport.x_padding_bytes: got %v", got)
+	}
+	reuse := mustMapField(t, transport, "reuse")
+	if got := reuse["max_concurrency"]; got != "1" {
+		t.Fatalf("transport.reuse.max_concurrency: got %v", got)
+	}
+}
+
 func TestParseGeneralSubscription_ClashJSON_TUICWithoutUUIDIsSkipped(t *testing.T) {
 	data := []byte(`{
 		"proxies": [

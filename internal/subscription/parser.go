@@ -1240,6 +1240,14 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 		if flow := normalizeVLESSFlow(getString(proxy, "flow")); flow != "" {
 			outbound["flow"] = flow
 		}
+		if normalizeV2RayNetwork(getString(proxy, "network")) == "xhttp" {
+			if encryption := strings.TrimSpace(getString(proxy, "encryption")); encryption != "" {
+				outbound["encryption"] = encryption
+			}
+			if udp, ok := getBool(proxy, "udp"); ok {
+				outbound["udp"] = udp
+			}
+		}
 		setTLSFromClash(outbound, proxy, "tls")
 		if !setV2RayTransportFromClash(outbound, proxy) {
 			return ParsedNode{}, false
@@ -4130,9 +4138,59 @@ func setV2RayTransportFromClash(outbound map[string]any, proxy map[string]any) b
 		}
 		outbound["transport"] = transport
 		return true
+	case "xhttp":
+		setXHTTPTransportFromClash(outbound, proxy)
+		return true
 	default:
 		return false
 	}
+}
+
+func setXHTTPTransportFromClash(outbound map[string]any, proxy map[string]any) {
+	transport := map[string]any{"type": "xhttp"}
+	opts, _ := getMap(proxy, "xhttp-opts", "xhttp_opts")
+
+	for _, field := range []struct{ source, target string }{
+		{"path", "path"},
+		{"host", "host"},
+		{"mode", "mode"},
+		{"x-padding-bytes", "x_padding_bytes"},
+		{"sc-max-each-post-bytes", "sc_max_each_post_bytes"},
+		{"sc-min-posts-interval-ms", "sc_min_posts_interval_ms"},
+	} {
+		if value := strings.TrimSpace(getString(opts, field.source)); value != "" {
+			transport[field.target] = value
+		}
+	}
+	if headers, ok := getMap(opts, "headers"); ok && len(headers) > 0 {
+		transport["headers"] = headers
+	}
+	if noGRPCHeader, ok := getBool(opts, "no-grpc-header", "no_grpc_header"); ok {
+		transport["no_grpc_header"] = noGRPCHeader
+	}
+
+	if rawReuse, ok := getMap(opts, "xmux", "reuse-settings", "reuse_settings"); ok {
+		reuse := map[string]any{}
+		for _, field := range []struct{ source, target string }{
+			{"max-concurrency", "max_concurrency"},
+			{"max-connections", "max_connections"},
+			{"c-max-reuse-times", "c_max_reuse_times"},
+			{"h-max-request-times", "h_max_request_times"},
+			{"h-max-reusable-secs", "h_max_reusable_secs"},
+		} {
+			if value := strings.TrimSpace(getString(rawReuse, field.source)); value != "" {
+				reuse[field.target] = value
+			}
+		}
+		if keepAlive, ok := getUint(rawReuse, "h-keep-alive-period", "h_keep_alive_period"); ok {
+			reuse["h_keep_alive_period"] = keepAlive
+		}
+		if len(reuse) > 0 {
+			transport["reuse"] = reuse
+		}
+	}
+
+	outbound["transport"] = transport
 }
 
 func setHTTPTransportFromClashOptions(transport map[string]any, opts map[string]any) {
