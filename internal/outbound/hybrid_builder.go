@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 
 	mihomoOutbound "github.com/metacubex/mihomo/adapter/outbound"
@@ -23,7 +24,8 @@ func NewHybridBuilder(fallback OutboundBuilder) *HybridBuilder {
 	return &HybridBuilder{fallback: fallback}
 }
 
-func (b *HybridBuilder) Build(rawOptions json.RawMessage) (adapter.Outbound, error) {
+func (b *HybridBuilder) Build(rawOptions json.RawMessage, relayPlatformIDs ...string) (adapter.Outbound, error) {
+	relayPlatformID := firstRelayPlatformID(relayPlatformIDs)
 	var header struct {
 		Type      string `json:"type"`
 		Transport struct {
@@ -32,7 +34,7 @@ func (b *HybridBuilder) Build(rawOptions json.RawMessage) (adapter.Outbound, err
 	}
 	if err := json.Unmarshal(rawOptions, &header); err != nil ||
 		header.Type != "vless" || header.Transport.Type != "xhttp" {
-		return b.fallback.Build(rawOptions)
+		return b.fallback.Build(rawOptions, relayPlatformID)
 	}
 
 	var cfg xhttpOutboundConfig
@@ -69,6 +71,19 @@ func (b *HybridBuilder) Build(rawOptions json.RawMessage) (adapter.Outbound, err
 		},
 	}
 	option.TFO = cfg.TCPFastOpen
+	if relayPlatformID != "" {
+		provider, ok := b.fallback.(interface {
+			RelayDialer(string) (*platformRelayDialer, error)
+		})
+		if !ok {
+			return nil, fmt.Errorf("xhttp relay platform runtime is not configured")
+		}
+		relayDialer, err := provider.RelayDialer(relayPlatformID)
+		if err != nil {
+			return nil, err
+		}
+		option.DialerForAPI = &mihomoRelayDialer{dialer: relayDialer}
+	}
 	if reuse := cfg.Transport.Reuse; reuse != nil {
 		option.XHTTPOpts.ReuseSettings = &mihomoOutbound.XHTTPReuseSettings{
 			MaxConcurrency:   reuse.MaxConcurrency,
@@ -170,4 +185,23 @@ func mihomoMetadata(network MC.NetWork, destination M.Socksaddr) *MC.Metadata {
 		metadata.DstIP = destination.Addr.Unmap()
 	}
 	return metadata
+}
+
+type mihomoRelayDialer struct {
+	dialer *platformRelayDialer
+}
+
+// DialContext adapts mihomo's host:port dialer contract to sing metadata.
+func (d *mihomoRelayDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return d.dialer.DialContext(ctx, network, M.ParseSocksaddr(address))
+}
+
+// ListenPacket adapts mihomo's packet dialer contract to the relay selector.
+func (d *mihomoRelayDialer) ListenPacket(
+	ctx context.Context,
+	_ string,
+	_ string,
+	rAddrPort netip.AddrPort,
+) (net.PacketConn, error) {
+	return d.dialer.ListenPacket(ctx, M.SocksaddrFromNetIP(rAddrPort))
 }

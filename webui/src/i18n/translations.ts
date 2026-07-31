@@ -142,6 +142,23 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "订阅内容不能为空": "Subscription content cannot be empty",
   "订阅源": "Subscription Source",
   "本地订阅": "Local subscription",
+  "前置 Platform": "Relay Platform",
+  "为本订阅解析出的节点统一指定单跳前置出口。":
+    "Assign one single-hop relay egress to every node parsed from this subscription.",
+  "单跳": "Single hop",
+  "直连": "Direct",
+  "直连（不使用前置节点）": "Direct (no relay node)",
+  "当前引用的 Platform（{{id}}）": "Referenced Platform ({{id}})",
+  "{{name}} · 路由视图 {{count}} 个节点": "{{name}} · {{count}} nodes in routing view",
+  "订阅节点": "Subscription node",
+  "Platform 列表加载失败，请刷新后重试。": "Platform list failed to load. Refresh and try again.",
+  "每次连接从该 Platform 的健康直连节点中轮询，最多尝试 3 个；候选耗尽时保持失败，不回退直连。":
+    "Each connection rotates through healthy direct nodes in this Platform, trying up to 3; exhaustion stays failed with no direct fallback.",
+  "保存链路变化时会立即移除旧节点身份，并刷新生成新身份。":
+    "Saving a path change immediately removes old node identities and refreshes new ones.",
+  "节点将按原始配置直接连接。": "Nodes connect directly using their original configuration.",
+  "链路": "Path",
+  "未知 Platform": "Unknown Platform",
   "远程": "Remote",
   "本地": "Local",
   "从 HTTP/HTTPS 订阅链接拉取内容": "Fetch content from HTTP/HTTPS subscription URL",

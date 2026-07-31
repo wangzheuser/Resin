@@ -27,7 +27,7 @@ type countingBuilder struct {
 	count int
 }
 
-func (b *countingBuilder) Build(_ json.RawMessage) (adapter.Outbound, error) {
+func (b *countingBuilder) Build(_ json.RawMessage, _ ...string) (adapter.Outbound, error) {
 	b.mu.Lock()
 	b.count++
 	b.mu.Unlock()
@@ -45,13 +45,13 @@ func (b *countingBuilder) Count() int {
 // failBuilder always fails.
 type failBuilder struct{}
 
-func (b *failBuilder) Build(_ json.RawMessage) (adapter.Outbound, error) {
+func (b *failBuilder) Build(_ json.RawMessage, _ ...string) (adapter.Outbound, error) {
 	return nil, errors.New("simulated build failure")
 }
 
 type panicBuilder struct{}
 
-func (b *panicBuilder) Build(_ json.RawMessage) (adapter.Outbound, error) {
+func (b *panicBuilder) Build(_ json.RawMessage, _ ...string) (adapter.Outbound, error) {
 	panic("simulated build panic")
 }
 
@@ -102,7 +102,7 @@ func newBlockingClosableBuilder() *blockingClosableBuilder {
 	}
 }
 
-func (b *blockingClosableBuilder) Build(_ json.RawMessage) (adapter.Outbound, error) {
+func (b *blockingClosableBuilder) Build(_ json.RawMessage, _ ...string) (adapter.Outbound, error) {
 	select {
 	case <-b.started:
 	default:

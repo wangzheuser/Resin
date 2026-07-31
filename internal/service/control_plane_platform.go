@@ -14,6 +14,7 @@ import (
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
 	"github.com/Resinat/Resin/internal/state"
+	"github.com/Resinat/Resin/internal/subscription"
 )
 
 // ------------------------------------------------------------------
@@ -531,6 +532,28 @@ func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessag
 func (s *ControlPlaneService) DeletePlatform(id string) error {
 	if id == platform.DefaultPlatformID {
 		return conflict("cannot delete Default platform")
+	}
+	s.relayReferenceMu.Lock()
+	defer s.relayReferenceMu.Unlock()
+
+	// Preserve subscription references so a configured relay never turns into
+	// an implicit direct path after Platform deletion.
+	var (
+		referenced   bool
+		referencedBy string
+	)
+	if s.SubMgr != nil {
+		s.SubMgr.Range(func(_ string, sub *subscription.Subscription) bool {
+			if sub.RelayPlatformID() != id {
+				return true
+			}
+			referenced = true
+			referencedBy = sub.Name()
+			return false
+		})
+	}
+	if referenced {
+		return conflict(fmt.Sprintf("platform is referenced by subscription %q", referencedBy))
 	}
 
 	if err := s.Engine.DeletePlatform(id); err != nil {

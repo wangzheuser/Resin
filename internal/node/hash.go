@@ -2,6 +2,7 @@
 package node
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/zeebo/xxh3"
 )
+
+const relayPlatformHashNamespace = "relay-platform-v1\x00"
 
 // Hash is a 128-bit node identity derived from canonical JSON of the node's
 // raw options (with the "tag" field removed). Two nodes with identical
@@ -35,6 +38,24 @@ func HashFromRawOptions(raw []byte) Hash {
 		return hashBytes(raw)
 	}
 	return hashBytes(canonical)
+}
+
+// HashFromRawOptionsWithRelayPlatform scopes a node identity by its relay
+// Platform. Direct nodes retain their historical hash for full compatibility.
+func HashFromRawOptionsWithRelayPlatform(raw []byte, relayPlatformID string) Hash {
+	base := HashFromRawOptions(raw)
+	if relayPlatformID == "" {
+		return base
+	}
+
+	// Namespace the scoped identity so it never collides with legacy raw hashes.
+	var payload bytes.Buffer
+	payload.Grow(len(relayPlatformHashNamespace) + len(base) + 1 + len(relayPlatformID))
+	payload.WriteString(relayPlatformHashNamespace)
+	payload.Write(base[:])
+	payload.WriteByte(0)
+	payload.WriteString(relayPlatformID)
+	return hashBytes(payload.Bytes())
 }
 
 // Hex returns the lowercase hex encoding of the hash.

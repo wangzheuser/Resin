@@ -27,6 +27,7 @@ type SubscriptionResponse struct {
 	SourceType              string `json:"source_type"`
 	URL                     string `json:"url"`
 	Content                 string `json:"content"`
+	RelayPlatformID         string `json:"relay_platform_id"`
 	UpdateInterval          string `json:"update_interval"`
 	NodeCount               int    `json:"node_count"`
 	HealthyNodeCount        int    `json:"healthy_node_count"`
@@ -69,6 +70,7 @@ func (s *ControlPlaneService) subToResponse(sub *subscription.Subscription) Subs
 		SourceType:              sub.SourceType(),
 		URL:                     sub.URL(),
 		Content:                 sub.Content(),
+		RelayPlatformID:         sub.RelayPlatformID(),
 		UpdateInterval:          time.Duration(sub.UpdateIntervalNs()).String(),
 		NodeCount:               nodeCount,
 		HealthyNodeCount:        healthyNodeCount,
@@ -120,6 +122,7 @@ type CreateSubscriptionRequest struct {
 	SourceType              *string `json:"source_type"`
 	URL                     *string `json:"url"`
 	Content                 *string `json:"content"`
+	RelayPlatformID         *string `json:"relay_platform_id"`
 	UpdateInterval          *string `json:"update_interval"`
 	Enabled                 *bool   `json:"enabled"`
 	Ephemeral               *bool   `json:"ephemeral"`
@@ -141,6 +144,36 @@ func parseSubscriptionSourceType(raw *string) (string, *ServiceError) {
 	default:
 		return "", invalidArg("source_type: must be remote or local")
 	}
+}
+
+// normalizeSubscriptionRelayPlatformID validates and canonicalizes a relay
+// Platform reference. Empty input selects direct dialing.
+func (s *ControlPlaneService) normalizeSubscriptionRelayPlatformID(raw string) (string, *ServiceError) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+	parsed, err := uuid.Parse(value)
+	if err != nil {
+		return "", invalidArg("relay_platform_id: must be a valid UUID")
+	}
+	platformID := parsed.String()
+	if s.Pool != nil {
+		if _, ok := s.Pool.GetPlatform(platformID); !ok {
+			return "", notFound("relay platform not found")
+		}
+		return platformID, nil
+	}
+	if s.Engine == nil {
+		return "", notFound("relay platform not found")
+	}
+	if _, err := s.Engine.GetPlatform(platformID); err != nil {
+		if errors.Is(err, state.ErrNotFound) {
+			return "", notFound("relay platform not found")
+		}
+		return "", internal("get relay platform", err)
+	}
+	return platformID, nil
 }
 
 // CreateSubscription creates a new subscription.
@@ -216,6 +249,18 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 		}
 		ephemeralNodeEvictDelay = d
 	}
+	relayPlatformID := ""
+	if req.RelayPlatformID != nil {
+		if strings.TrimSpace(*req.RelayPlatformID) != "" {
+			s.relayReferenceMu.RLock()
+			defer s.relayReferenceMu.RUnlock()
+		}
+		var relayErr *ServiceError
+		relayPlatformID, relayErr = s.normalizeSubscriptionRelayPlatformID(*req.RelayPlatformID)
+		if relayErr != nil {
+			return nil, relayErr
+		}
+	}
 
 	id := uuid.New().String()
 	now := time.Now().UnixNano()
@@ -226,6 +271,7 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 		SourceType:                sourceType,
 		URL:                       subURL,
 		Content:                   content,
+		RelayPlatformID:           relayPlatformID,
 		UpdateIntervalNs:          int64(updateInterval),
 		Enabled:                   enabled,
 		Ephemeral:                 ephemeral,
@@ -242,6 +288,7 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 	sub.SetFetchConfig(subURL, int64(updateInterval))
 	sub.SetSourceType(sourceType)
 	sub.SetContent(content)
+	sub.SetRelayPlatformID(relayPlatformID)
 	sub.SetIncrementalAliveNodes(incrementalAliveNodes)
 	sub.SetEphemeralNodeEvictDelayNs(int64(ephemeralNodeEvictDelay))
 	sub.CreatedAtNs = now
@@ -276,6 +323,7 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 	enabledChanged := false
 	urlChanged := false
 	contentChanged := false
+	relayPlatformChanged := false
 	sourceType := sub.SourceType()
 
 	newName := sub.Name()
@@ -318,6 +366,22 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 		if newContent != sub.Content() {
 			contentChanged = true
 		}
+	}
+
+	newRelayPlatformID := sub.RelayPlatformID()
+	if relayPlatformID, ok, err := patch.optionalString("relay_platform_id"); err != nil {
+		return nil, err
+	} else if ok {
+		// Keep the referenced Platform stable until persistence and runtime state
+		// publish the replacement value.
+		s.relayReferenceMu.RLock()
+		defer s.relayReferenceMu.RUnlock()
+		normalized, relayErr := s.normalizeSubscriptionRelayPlatformID(relayPlatformID)
+		if relayErr != nil {
+			return nil, relayErr
+		}
+		newRelayPlatformID = normalized
+		relayPlatformChanged = newRelayPlatformID != sub.RelayPlatformID()
 	}
 
 	newInterval := sub.UpdateIntervalNs()
@@ -371,6 +435,7 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 		SourceType:                sourceType,
 		URL:                       newURL,
 		Content:                   newContent,
+		RelayPlatformID:           newRelayPlatformID,
 		UpdateIntervalNs:          newInterval,
 		Enabled:                   newEnabled,
 		Ephemeral:                 newEphemeral,
@@ -386,6 +451,11 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 	// Apply side-effects via scheduler.
 	sub.SetFetchConfig(newURL, newInterval)
 	sub.SetContent(newContent)
+	if relayPlatformChanged {
+		s.Scheduler.SetSubscriptionRelayPlatformID(sub, newRelayPlatformID)
+	} else {
+		sub.SetRelayPlatformID(newRelayPlatformID)
+	}
 	sub.SetEphemeral(newEphemeral)
 	sub.SetIncrementalAliveNodes(newIncrementalAliveNodes)
 	sub.SetEphemeralNodeEvictDelayNs(newEphemeralNodeEvictDelay)
@@ -397,7 +467,7 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 	if enabledChanged {
 		s.Scheduler.SetSubscriptionEnabled(sub, newEnabled)
 	}
-	if urlChanged || contentChanged {
+	if urlChanged || contentChanged || relayPlatformChanged {
 		go s.Scheduler.UpdateSubscription(sub)
 	}
 

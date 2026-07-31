@@ -309,6 +309,7 @@ Resin 从订阅中获取节点配置。
 * ID：全不可变 UUID，作为主键。
 * Name：订阅的名称，允许重名，许修改。
 * URL：订阅的 URL
+* RelayPlatformID：可选的前置 Platform ID。空字符串表示直连；非空时，订阅解析出的节点通过该 Platform 的健康直连节点建立单跳连接。
 * UpdateInterval：订阅的更新间隔，最短 30 秒。
 * Ephemeral：是否为临时订阅。临时订阅指的是，当节点被连续熔断超过该订阅的 EphemeralNodeEvictDelay 时间后，会从订阅中物理移除该节点（从而全局池的引用减 1）。
 * EphemeralNodeEvictDelay：临时节点驱逐延迟（每个订阅独立配置）。仅对 Ephemeral=True 的订阅生效。默认 72 小时。
@@ -334,6 +335,19 @@ Resin 从订阅中获取节点配置。
 
 #### 订阅的更新
 后台有一个订阅更新服务，每 13～17 秒扫描所有订阅。如果未来 15 秒内，订阅将达到或者已达到 UpdateInterval 时间没有更新（对比 LastChecked）会进行更新。
+
+#### 单跳前置 Platform
+
+订阅可以通过 `RelayPlatformID` 引用一个 Platform，复用该 Platform 当前可路由视图中的健康节点作为前置出口。实现约束如下：
+
+* 链路固定为 `Resin -> 前置节点 -> 订阅目标节点`，仅支持单跳。
+* 候选节点必须位于被引用 Platform 的当前 View 中，拥有可用 Outbound，支持当前网络类型，且其所属订阅的 `RelayPlatformID` 为空、原始配置中的 `detour` 为空。
+* 选择器按共享游标轮询候选；每次拨号最多尝试 3 个。候选为空或全部尝试失败时返回带 Platform ID 与尝试次数的错误，保持 fail-closed。
+* 先快照 View 中的 Hash，再执行节点检查和网络拨号，避免在 `RoutableView.Range` 的分片读锁内进行 I/O。
+* 前置节点失败不直接记为前置节点的被动失败，因为该结果同时包含“前置节点到目标节点”的路径因素；前置节点健康由独立探测维护。
+* sing-box 节点通过内部 `resin-relay-platform-<PlatformID>` detour 接入；VLESS XHTTP 通过 mihomo 的 `DialerForAPI` 接入同一个选择器。持久化的原始节点 JSON 保持不变。
+* 节点 Hash 按 `raw options + RelayPlatformID` 作用域化。空 ID 完全沿用历史 Hash；相同配置经不同 Platform 转发时形成不同节点身份。
+* 删除 Platform 前检查订阅引用并返回冲突；修改 Platform 的过滤条件后，动态 View 直接影响后续连接，无需重建目标节点 Outbound。
 无论更新下载成功还是失败，都会更新 LastChecked。
 如果更新下载失败，记录 LastError。现有节点保持不变。
 如果更新下载成功，更新 LastUpdated，并执行以下逻辑：
@@ -589,7 +603,7 @@ Resin 项目中所有的数据库都设计为单写，不会有多进程写入�
 #### state.db
 * system_config(config_json, version, updated_at_ns)
 * platforms(id PK, name UNIQUE, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, updated_at_ns)
-* subscriptions(id PK, name, url, update_interval_ns, enabled, ephemeral, created_at_ns, updated_at_ns)
+* subscriptions(id PK, name, source_type, url, content, relay_platform_id, update_interval_ns, enabled, ephemeral, incremental_alive_nodes, ephemeral_node_evict_delay_ns, created_at_ns, updated_at_ns)
 * account_header_rules(url_prefix PK, headers_json, updated_at_ns)
 
 > 订阅的 LastCheck、LastError、LastUpdate 不进行持久化。因为启动时总是会更新一次。

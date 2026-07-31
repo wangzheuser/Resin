@@ -1388,6 +1388,68 @@ func TestAPIContract_SubscriptionUpdateIntervalMinimum(t *testing.T) {
 	assertErrorCode(t, rec, "INVALID_ARGUMENT")
 }
 
+func TestAPIContract_SubscriptionRelayPlatformReference(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+
+	platformRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
+		"name": "RelayGate",
+	}, true)
+	if platformRec.Code != http.StatusCreated {
+		t.Fatalf("create relay platform status: got %d, want %d, body=%s", platformRec.Code, http.StatusCreated, platformRec.Body.String())
+	}
+	platformBody := decodeJSONMap(t, platformRec)
+	platformID, _ := platformBody["id"].(string)
+	if platformID == "" {
+		t.Fatalf("create relay platform missing id: body=%s", platformRec.Body.String())
+	}
+
+	subscriptionRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/subscriptions", map[string]any{
+		"name":              "relayed-subscription",
+		"url":               "https://example.com/relayed-subscription",
+		"relay_platform_id": platformID,
+	}, true)
+	if subscriptionRec.Code != http.StatusCreated {
+		t.Fatalf("create relayed subscription status: got %d, want %d, body=%s", subscriptionRec.Code, http.StatusCreated, subscriptionRec.Body.String())
+	}
+	subscriptionBody := decodeJSONMap(t, subscriptionRec)
+	if subscriptionBody["relay_platform_id"] != platformID {
+		t.Fatalf("relay_platform_id: got %v, want %q", subscriptionBody["relay_platform_id"], platformID)
+	}
+	subscriptionID, _ := subscriptionBody["id"].(string)
+
+	deleteReferencedRec := doJSONRequest(t, srv, http.MethodDelete, "/api/v1/platforms/"+platformID, nil, true)
+	if deleteReferencedRec.Code != http.StatusConflict {
+		t.Fatalf("delete referenced Platform status: got %d, want %d, body=%s", deleteReferencedRec.Code, http.StatusConflict, deleteReferencedRec.Body.String())
+	}
+	assertErrorCode(t, deleteReferencedRec, "CONFLICT")
+
+	clearRelayRec := doJSONRequest(t, srv, http.MethodPatch, "/api/v1/subscriptions/"+subscriptionID, map[string]any{
+		"relay_platform_id": "",
+	}, true)
+	if clearRelayRec.Code != http.StatusOK {
+		t.Fatalf("clear relay Platform status: got %d, want %d, body=%s", clearRelayRec.Code, http.StatusOK, clearRelayRec.Body.String())
+	}
+	if clearBody := decodeJSONMap(t, clearRelayRec); clearBody["relay_platform_id"] != "" {
+		t.Fatalf("cleared relay_platform_id: got %v", clearBody["relay_platform_id"])
+	}
+
+	malformedRec := doJSONRequest(t, srv, http.MethodPatch, "/api/v1/subscriptions/"+subscriptionID, map[string]any{
+		"relay_platform_id": "bad-id",
+	}, true)
+	if malformedRec.Code != http.StatusBadRequest {
+		t.Fatalf("malformed relay Platform status: got %d, want %d, body=%s", malformedRec.Code, http.StatusBadRequest, malformedRec.Body.String())
+	}
+	assertErrorCode(t, malformedRec, "INVALID_ARGUMENT")
+
+	missingRec := doJSONRequest(t, srv, http.MethodPatch, "/api/v1/subscriptions/"+subscriptionID, map[string]any{
+		"relay_platform_id": "33333333-3333-3333-3333-333333333333",
+	}, true)
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("missing relay Platform status: got %d, want %d, body=%s", missingRec.Code, http.StatusNotFound, missingRec.Body.String())
+	}
+	assertErrorCode(t, missingRec, "NOT_FOUND")
+}
+
 func TestAPIContract_SubscriptionEphemeralEvictDelay_DefaultAndCustom(t *testing.T) {
 	srv, _, _ := newControlPlaneTestServer(t)
 

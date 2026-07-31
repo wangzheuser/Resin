@@ -850,7 +850,7 @@ func (c *trackCloser) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn
 	return nil, errors.New("track-closer: listen packet not supported")
 }
 
-func (b *closableBuilder) Build(_ json.RawMessage) (adapter.Outbound, error) {
+func (b *closableBuilder) Build(_ json.RawMessage, _ ...string) (adapter.Outbound, error) {
 	tc := &trackCloser{}
 	b.mu.Lock()
 	b.built = append(b.built, tc)

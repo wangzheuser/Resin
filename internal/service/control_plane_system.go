@@ -63,6 +63,9 @@ type ControlPlaneService struct {
 
 	configMu      sync.Mutex
 	configVersion int
+	// relayReferenceMu keeps Platform deletion atomic with subscription relay
+	// reference creation and replacement.
+	relayReferenceMu sync.RWMutex
 }
 
 // ------------------------------------------------------------------
@@ -105,6 +108,7 @@ var subscriptionPatchAllowedFields = map[string]bool{
 	"name":                       true,
 	"url":                        true,
 	"content":                    true,
+	"relay_platform_id":          true,
 	"update_interval":            true,
 	"enabled":                    true,
 	"ephemeral":                  true,

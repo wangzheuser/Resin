@@ -268,14 +268,17 @@ func newTopologyRuntime(
 		},
 	})
 	log.Println("Topology: GlobalNodePool initialized")
+	relayPlatformResolver := newNodeRelayPlatformResolver(subManager)
 
 	singboxBuilder, err := outbound.NewSingboxBuilderWithConfig(outbound.SingboxBuilderConfig{
-		DNSUpstreams: envCfg.NodeDNSUpstreams,
+		DNSUpstreams:           envCfg.NodeDNSUpstreams,
+		RelayPool:              pool,
+		ResolveRelayPlatformID: relayPlatformResolver,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("singbox builder: %w", err)
 	}
-	outboundMgr := outbound.NewOutboundManager(pool, outbound.NewHybridBuilder(singboxBuilder))
+	outboundMgr := outbound.NewOutboundManager(pool, outbound.NewHybridBuilder(singboxBuilder), relayPlatformResolver)
 
 	probeMgr := probe.NewProbeManager(probe.ProbeConfig{
 		Pool:        pool,
@@ -364,6 +367,42 @@ func newTopologyRuntime(
 	}, nil
 }
 
+// newNodeRelayPlatformResolver derives the scoped relay configuration from a
+// node's subscription references and rejects inconsistent deduplicated state.
+func newNodeRelayPlatformResolver(subManager *topology.SubscriptionManager) outbound.NodeRelayPlatformResolver {
+	return func(entry *node.NodeEntry) (string, error) {
+		if entry == nil || subManager == nil {
+			return "", fmt.Errorf("node relay metadata is unavailable")
+		}
+		var (
+			resolved string
+			found    bool
+		)
+		for _, subID := range entry.SubscriptionIDs() {
+			sub := subManager.Lookup(subID)
+			if sub == nil {
+				continue
+			}
+			platformID := sub.RelayPlatformID()
+			if !found {
+				resolved = platformID
+				found = true
+				continue
+			}
+			if resolved != platformID {
+				return "", fmt.Errorf("node subscriptions reference conflicting relay platforms")
+			}
+		}
+		if !found {
+			return "", fmt.Errorf("node has no subscription relay metadata")
+		}
+		if expected := node.HashFromRawOptionsWithRelayPlatform(entry.RawOptions, resolved); expected != entry.Hash {
+			return "", fmt.Errorf("node hash does not match its relay platform scope")
+		}
+		return resolved, nil
+	}
+}
+
 func markNodeRemovedDirty(engine *state.StateEngine, hash node.Hash, entry *node.NodeEntry) {
 	hashHex := hash.Hex()
 	engine.MarkNodeStaticDelete(hashHex)
@@ -393,6 +432,7 @@ func bootstrapTopology(
 		sub.SetFetchConfig(ms.URL, ms.UpdateIntervalNs)
 		sub.SetSourceType(ms.SourceType)
 		sub.SetContent(ms.Content)
+		sub.SetRelayPlatformID(ms.RelayPlatformID)
 		sub.SetIncrementalAliveNodes(ms.IncrementalAliveNodes)
 		sub.SetEphemeralNodeEvictDelayNs(ms.EphemeralNodeEvictDelayNs)
 		sub.CreatedAtNs = ms.CreatedAtNs
@@ -975,7 +1015,8 @@ func restoreBootstrapNodeLatencies(
 }
 
 // bootstrapNodes loads cached node data from persistence for bootstrap recovery.
-// Steps: static nodes → subscription bindings → dynamic state → latency tables.
+// Direct outbounds warm first; restored health then builds relay candidate Views;
+// relay-aware outbounds warm last so eager protocol startup can use candidates.
 func bootstrapNodes(
 	engine *state.StateEngine,
 	pool *topology.GlobalNodePool,
@@ -989,11 +1030,12 @@ func bootstrapNodes(
 		return err
 	}
 
-	warmupBootstrapOutbounds(hashes, outboundMgr)
-
 	if err := restoreBootstrapSubscriptionBindings(engine, pool, subManager); err != nil {
 		return err
 	}
+
+	directHashes, relayHashes := partitionBootstrapHashesByRelay(hashes, pool, subManager)
+	warmupBootstrapOutbounds(directHashes, outboundMgr)
 	if err := restoreBootstrapNodeDynamics(engine, pool); err != nil {
 		return err
 	}
@@ -1005,5 +1047,33 @@ func bootstrapNodes(
 	); err != nil {
 		return err
 	}
+
+	// Populate relay candidate Views from restored direct-node health before
+	// starting protocols that may eagerly use their detour during Build.
+	pool.RebuildAllPlatforms()
+	warmupBootstrapOutbounds(relayHashes, outboundMgr)
 	return nil
+}
+
+// partitionBootstrapHashesByRelay separates direct and relayed identities so
+// bootstrap can establish relay candidates before relay-aware outbounds start.
+func partitionBootstrapHashesByRelay(
+	hashes []node.Hash,
+	pool *topology.GlobalNodePool,
+	subManager *topology.SubscriptionManager,
+) (direct []node.Hash, relayed []node.Hash) {
+	resolver := newNodeRelayPlatformResolver(subManager)
+	for _, hash := range hashes {
+		entry, ok := pool.GetEntry(hash)
+		if !ok {
+			continue
+		}
+		relayPlatformID, err := resolver(entry)
+		if err == nil && relayPlatformID == "" {
+			direct = append(direct, hash)
+			continue
+		}
+		relayed = append(relayed, hash)
+	}
+	return direct, relayed
 }

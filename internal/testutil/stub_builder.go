@@ -46,7 +46,7 @@ func (s *stubOutbound) Close() error {
 	return nil
 }
 
-func (b *StubOutboundBuilder) Build(_ json.RawMessage) (adapter.Outbound, error) {
+func (b *StubOutboundBuilder) Build(_ json.RawMessage, _ ...string) (adapter.Outbound, error) {
 	return &stubOutbound{
 		dialer: net.Dialer{Timeout: 30 * time.Second},
 	}, nil

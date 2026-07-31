@@ -101,7 +101,8 @@ func (mn *ManagedNodes) RangeNodes(fn func(node.Hash, ManagedNode) bool) {
 // Subscription represents a subscription's runtime state.
 // It has two synchronization layers:
 //   - mu protects mutable config fields
-//     (url/updateInterval/name/enabled/ephemeral/ephemeralNodeEvictDelayNs).
+//     (url/sourceType/content/relayPlatformID/updateInterval/name/enabled/
+//     ephemeral/ephemeralNodeEvictDelayNs).
 //   - opMu serializes high-level operations (update/rename/eviction/delete)
 //     on the same subscription instance.
 //
@@ -120,6 +121,9 @@ type Subscription struct {
 	url        string
 	sourceType string
 	content    string
+	// relayPlatformID selects the Platform whose direct nodes provide the
+	// subscription's single-hop relay. Empty means direct dialing.
+	relayPlatformID string
 	// updateIntervalNs is the configured subscription refresh interval.
 	updateIntervalNs      int64
 	name                  string
@@ -216,6 +220,13 @@ func (s *Subscription) Content() string {
 	return s.content
 }
 
+// RelayPlatformID returns the single-hop relay Platform ID (thread-safe).
+func (s *Subscription) RelayPlatformID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.relayPlatformID
+}
+
 // ConfigVersion returns the scheduler input config version.
 func (s *Subscription) ConfigVersion() int64 {
 	return s.configVersion.Load()
@@ -256,6 +267,17 @@ func (s *Subscription) SetContent(content string) {
 	s.mu.Lock()
 	if s.content != content {
 		s.content = content
+		s.configVersion.Add(1)
+	}
+	s.mu.Unlock()
+}
+
+// SetRelayPlatformID updates the single-hop relay Platform and invalidates
+// in-flight refresh attempts when the value changes.
+func (s *Subscription) SetRelayPlatformID(platformID string) {
+	s.mu.Lock()
+	if s.relayPlatformID != platformID {
+		s.relayPlatformID = platformID
 		s.configVersion.Add(1)
 	}
 	s.mu.Unlock()

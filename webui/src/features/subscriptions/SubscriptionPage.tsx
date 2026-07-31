@@ -1,7 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { AlertTriangle, Eye, Filter, Info, Pencil, Plus, RefreshCw, Search, Sparkles, Trash2, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Eye, Filter, Info, Pencil, Plus, RefreshCw, Route, Search, Sparkles, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { Link } from "react-router-dom";
@@ -20,6 +20,8 @@ import { useToast } from "../../hooks/useToast";
 import { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
 import { formatDateTime, formatGoDuration, formatRelativeTime } from "../../lib/time";
+import { listPlatforms } from "../platforms/api";
+import type { Platform } from "../platforms/types";
 import {
   cleanupSubscriptionCircuitOpenNodes,
   createSubscription,
@@ -43,6 +45,7 @@ const subscriptionCreateSchema = z.object({
   source_type: z.enum(["remote", "local"]),
   url: z.string(),
   content: z.string(),
+  relay_platform_id: z.string(),
   update_interval: z.string().trim().min(1, "更新间隔不能为空"),
   ephemeral_node_evict_delay: z.string().trim().min(1, "临时节点驱逐延迟不能为空"),
   enabled: z.boolean(),
@@ -71,6 +74,7 @@ const subscriptionEditSchema = subscriptionCreateSchema;
 type SubscriptionCreateForm = z.infer<typeof subscriptionCreateSchema>;
 type SubscriptionEditForm = z.infer<typeof subscriptionEditSchema>;
 const EMPTY_SUBSCRIPTIONS: Subscription[] = [];
+const EMPTY_PLATFORMS: Platform[] = [];
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
 const LOCAL_SOURCE_UPDATE_INTERVAL = "12h";
 const SUBSCRIPTION_DISABLE_HINT = "禁用订阅后，相关节点不会参与平台路由、健康统计或自动探测。";
@@ -91,6 +95,7 @@ function subscriptionToEditForm(subscription: Subscription): SubscriptionEditFor
     source_type: subscription.source_type,
     url: subscription.url,
     content: subscription.content ?? "",
+    relay_platform_id: subscription.relay_platform_id ?? "",
     update_interval: subscription.update_interval,
     ephemeral_node_evict_delay: subscription.ephemeral_node_evict_delay,
     enabled: subscription.enabled,
@@ -118,6 +123,91 @@ function normalizeSubmitUpdateInterval(sourceType: SubscriptionSourceType, raw: 
     return LOCAL_SOURCE_UPDATE_INTERVAL;
   }
   return raw.trim();
+}
+
+/** Loads every Platform page so the relay selector never hides valid choices. */
+async function listRelayPlatformOptions(): Promise<Platform[]> {
+  const pageSize = 100;
+  const first = await listPlatforms({ limit: pageSize, offset: 0 });
+  if (first.items.length >= first.total) {
+    return first.items;
+  }
+  const remainingPages = Math.ceil((first.total - first.items.length) / pageSize);
+  const remaining = await Promise.all(
+    Array.from({ length: remainingPages }, (_, index) =>
+      listPlatforms({ limit: pageSize, offset: (index + 1) * pageSize })
+    )
+  );
+  return first.items.concat(remaining.flatMap((page) => page.items));
+}
+
+type RelayPlatformPickerProps = {
+  id: string;
+  value: string;
+  platforms: Platform[];
+  loading: boolean;
+  loadError: boolean;
+  onChange: (platformID: string) => void;
+};
+
+/** Renders a compact route preview and the single-hop Platform selector. */
+function RelayPlatformPicker({ id, value, platforms, loading, loadError, onChange }: RelayPlatformPickerProps) {
+  const { t } = useI18n();
+  const selected = platforms.find((item) => item.id === value);
+
+  return (
+    <div className={`field-group field-span-2 relay-platform-picker ${value ? "relay-platform-picker-active" : ""}`}>
+      <div className="relay-platform-picker-head">
+        <div>
+          <label className="field-label" htmlFor={id}>{t("前置 Platform")}</label>
+          <p>{t("为本订阅解析出的节点统一指定单跳前置出口。")}</p>
+        </div>
+        <span className="relay-mode-badge">{value ? t("单跳") : t("直连")}</span>
+      </div>
+
+      <Select
+        id={id}
+        value={value}
+        disabled={loading}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        <option value="">{t("直连（不使用前置节点）")}</option>
+        {value && !selected ? <option value={value}>{t("当前引用的 Platform（{{id}}）", { id: value })}</option> : null}
+        {platforms.map((item) => (
+          <option key={item.id} value={item.id}>
+            {t("{{name}} · 路由视图 {{count}} 个节点", { name: item.name, count: item.routable_node_count })}
+          </option>
+        ))}
+      </Select>
+
+      <div className="relay-route-preview" aria-live="polite">
+        <span>Resin</span>
+        <ArrowRight size={14} />
+        {value ? (
+          <>
+            <strong><Route size={14} />{selected?.name ?? t("前置 Platform")}</strong>
+            <ArrowRight size={14} />
+          </>
+        ) : null}
+        <span>{t("订阅节点")}</span>
+      </div>
+
+      {loadError ? (
+        <p className="field-error">{t("Platform 列表加载失败，请刷新后重试。")}</p>
+      ) : value ? (
+        <div className="relay-platform-hint-stack">
+          <p className="relay-platform-hint">
+            {t("每次连接从该 Platform 的健康直连节点中轮询，最多尝试 3 个；候选耗尽时保持失败，不回退直连。")}
+          </p>
+          <p className="relay-platform-hint relay-platform-change-hint">
+            {t("保存链路变化时会立即移除旧节点身份，并刷新生成新身份。")}
+          </p>
+        </div>
+      ) : (
+        <p className="relay-platform-hint">{t("节点将按原始配置直接连接。")}</p>
+      )}
+    </div>
+  );
 }
 
 export function SubscriptionPage() {
@@ -166,6 +256,17 @@ export function SubscriptionPage() {
   const totalPages = Math.max(1, Math.ceil(totalSubscriptions / pageSize));
   const currentPage = Math.min(page, totalPages - 1);
 
+  const relayPlatformsQuery = useQuery({
+    queryKey: ["platforms", "subscription-relay-options"],
+    queryFn: listRelayPlatformOptions,
+    staleTime: 30_000,
+  });
+  const relayPlatforms = relayPlatformsQuery.data ?? EMPTY_PLATFORMS;
+  const relayPlatformByID = useMemo(
+    () => new Map(relayPlatforms.map((item) => [item.id, item])),
+    [relayPlatforms]
+  );
+
   const selectedSubscription = useMemo(() => {
     if (!selectedSubscriptionId) {
       return null;
@@ -182,6 +283,7 @@ export function SubscriptionPage() {
       source_type: "remote",
       url: "",
       content: "",
+      relay_platform_id: "",
       update_interval: "12h",
       ephemeral_node_evict_delay: "72h",
       enabled: true,
@@ -192,6 +294,7 @@ export function SubscriptionPage() {
 
   const createEphemeral = createForm.watch("ephemeral");
   const createSourceType = createForm.watch("source_type");
+  const createRelayPlatformID = createForm.watch("relay_platform_id");
 
   const editForm = useForm<SubscriptionEditForm>({
     resolver: zodResolver(subscriptionEditSchema),
@@ -200,6 +303,7 @@ export function SubscriptionPage() {
       source_type: "remote",
       url: "",
       content: "",
+      relay_platform_id: "",
       update_interval: "12h",
       ephemeral_node_evict_delay: "72h",
       enabled: true,
@@ -210,6 +314,7 @@ export function SubscriptionPage() {
 
   const editEphemeral = editForm.watch("ephemeral");
   const editSourceType = editForm.watch("source_type");
+  const editRelayPlatformID = editForm.watch("relay_platform_id");
 
   useEffect(() => {
     if (!selectedSubscription) {
@@ -255,6 +360,7 @@ export function SubscriptionPage() {
         source_type: "remote",
         url: "",
         content: "",
+        relay_platform_id: "",
         update_interval: LOCAL_SOURCE_UPDATE_INTERVAL,
         ephemeral_node_evict_delay: "72h",
         enabled: true,
@@ -281,6 +387,7 @@ export function SubscriptionPage() {
         enabled: formData.enabled,
         ephemeral: formData.ephemeral,
         incremental_alive_nodes: formData.incremental_alive_nodes,
+        relay_platform_id: formData.relay_platform_id,
         ...(formData.source_type === "remote"
           ? { url: formData.url.trim() }
           : { content: formData.content }),
@@ -382,6 +489,7 @@ export function SubscriptionPage() {
       enabled: values.enabled,
       ephemeral: values.ephemeral,
       incremental_alive_nodes: values.incremental_alive_nodes,
+      relay_platform_id: values.relay_platform_id,
       ...(values.source_type === "remote"
         ? { url: values.url.trim() }
         : { content: values.content }),
@@ -463,6 +571,23 @@ export function SubscriptionPage() {
         cell: (info) => formatGoDuration(info.getValue()),
       }),
       col.display({
+        id: "relay_platform",
+        header: t("链路"),
+        cell: (info) => {
+          const platformID = info.row.original.relay_platform_id;
+          if (!platformID) {
+            return <span className="subscription-route-chip subscription-route-chip-direct">{t("直连")}</span>;
+          }
+          const platformName = relayPlatformByID.get(platformID)?.name ?? t("未知 Platform");
+          return (
+            <span className="subscription-route-chip" title={platformID}>
+              <Route size={12} />
+              {platformName}
+            </span>
+          );
+        },
+      }),
+      col.display({
         id: "node_count",
         header: t("节点数"),
         cell: (info) => {
@@ -538,7 +663,7 @@ export function SubscriptionPage() {
         },
       }),
     ],
-    [col, handleDelete, handleRefresh, isDeletePending, isRefreshPending, openDrawer, t]
+    [col, handleDelete, handleRefresh, isDeletePending, isRefreshPending, openDrawer, relayPlatformByID, t]
   );
 
   return (
@@ -780,6 +905,15 @@ export function SubscriptionPage() {
                     </div>
                   )}
 
+                  <RelayPlatformPicker
+                    id="edit-sub-relay-platform"
+                    value={editRelayPlatformID}
+                    platforms={relayPlatforms}
+                    loading={relayPlatformsQuery.isLoading}
+                    loadError={relayPlatformsQuery.isError}
+                    onChange={(platformID) => editForm.setValue("relay_platform_id", platformID, { shouldDirty: true, shouldValidate: true })}
+                  />
+
                   <div className="field-group">
                     <label className="field-label" htmlFor="edit-sub-ephemeral" style={{ visibility: "hidden" }}>
                       {t("临时订阅")}
@@ -1015,6 +1149,15 @@ export function SubscriptionPage() {
                   ) : null}
                 </div>
               )}
+
+              <RelayPlatformPicker
+                id="create-sub-relay-platform"
+                value={createRelayPlatformID}
+                platforms={relayPlatforms}
+                loading={relayPlatformsQuery.isLoading}
+                loadError={relayPlatformsQuery.isError}
+                onChange={(platformID) => createForm.setValue("relay_platform_id", platformID, { shouldDirty: true, shouldValidate: true })}
+              />
 
               <div className="field-group">
                 <label className="field-label" htmlFor="create-sub-ephemeral" style={{ visibility: "hidden" }}>

@@ -51,6 +51,16 @@ It helps shield your services from unstable underlying proxy nodes by aggregatin
 - Remote subscription URL: `http://` or `https://`.
 - Local subscription content: paste subscription content directly in the UI/API.
 
+### Assign a single-hop relay Platform to subscription nodes
+
+When target nodes in a subscription need an already-reachable node before their server connection can be established, select **Relay Platform** while creating or editing the subscription:
+
+1. Create a Platform whose filters include the nodes suitable as relay egresses.
+2. Reference that Platform from the subscription; an empty value means direct dialing.
+3. For every target-server connection, Resin rotates through healthy direct nodes in the Platform and tries at most 3 candidates.
+
+This setting applies to **outbound connections made by parsed nodes**; it does not change how a remote subscription URL is downloaded. The path is always one hop: `Resin → relay Platform node → subscription node`. An empty candidate set or exhausted attempts ends the connection with an error and does not fall back to direct dialing. Nodes that already contain `detour`, or that reference another relay Platform, are excluded from candidates. A referenced Platform must be detached from subscriptions before deletion.
+
 ### Subscription content formats
 
 - sing-box JSON: `{"outbounds":[...]}` or raw outbound array `[...]`.

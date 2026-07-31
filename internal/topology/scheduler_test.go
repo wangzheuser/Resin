@@ -94,6 +94,48 @@ func TestScheduler_UpdateSubscription_Success(t *testing.T) {
 	}
 }
 
+func TestScheduler_UpdateSubscription_ScopesHashesByRelayPlatform(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	sub := subscription.NewSubscription("relay-sub", "RelaySub", "http://example.com", true, false)
+	sub.SetFetchConfig(sub.URL(), int64(time.Hour))
+	sub.SetIncrementalAliveNodes(true)
+	sub.SetRelayPlatformID("11111111-1111-1111-1111-111111111111")
+	subMgr.Register(sub)
+
+	pool := newTestPool(subMgr)
+	const rawOutbound = `{"type":"shadowsocks","tag":"relay-target","server":"198.51.100.20","server_port":443}`
+	sched := newTestScheduler(subMgr, pool, makeMockFetcher(makeSubscriptionJSON(rawOutbound), nil))
+	sched.UpdateSubscription(sub)
+
+	firstHash := node.HashFromRawOptionsWithRelayPlatform(
+		[]byte(rawOutbound),
+		"11111111-1111-1111-1111-111111111111",
+	)
+	if _, ok := pool.GetEntry(firstHash); !ok {
+		t.Fatalf("first scoped hash %s is missing", firstHash.Hex())
+	}
+	if directHash := node.HashFromRawOptions([]byte(rawOutbound)); directHash == firstHash {
+		t.Fatal("relay-scoped hash must differ from the direct hash")
+	}
+
+	// A relay change replaces the previous identity even in incremental mode.
+	sched.SetSubscriptionRelayPlatformID(sub, "22222222-2222-2222-2222-222222222222")
+	if _, ok := pool.GetEntry(firstHash); ok {
+		t.Fatal("previous relay scope should be removed before replacement refresh")
+	}
+	if sub.ManagedNodes().Size() != 0 {
+		t.Fatal("relay change should publish an empty fail-closed subscription view")
+	}
+	sched.UpdateSubscription(sub)
+	secondHash := node.HashFromRawOptionsWithRelayPlatform(
+		[]byte(rawOutbound),
+		"22222222-2222-2222-2222-222222222222",
+	)
+	if _, ok := pool.GetEntry(secondHash); !ok {
+		t.Fatalf("second scoped hash %s is missing", secondHash.Hex())
+	}
+}
+
 func TestScheduler_UpdateSubscription_DownloadViaHTTPServer(t *testing.T) {
 	subMgr := NewSubscriptionManager()
 	pool := newTestPool(subMgr)

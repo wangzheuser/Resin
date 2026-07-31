@@ -196,6 +196,7 @@ func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscriptio
 	attemptURL := sub.URL()
 	attemptSourceType := sub.SourceType()
 	attemptContent := sub.Content()
+	attemptRelayPlatformID := sub.RelayPlatformID()
 	attemptConfigVersion := sub.ConfigVersion()
 
 	// 1. Fetch/read content (lock-free).
@@ -224,7 +225,7 @@ func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscriptio
 	refreshedManagedNodes := subscription.NewManagedNodes()
 	rawByHash := make(map[node.Hash][]byte)
 	for _, p := range parsed {
-		h := node.HashFromRawOptions(p.RawOptions)
+		h := node.HashFromRawOptionsWithRelayPlatform(p.RawOptions, attemptRelayPlatformID)
 		existing, _ := refreshedManagedNodes.LoadNode(h)
 		existing.Tags = append(existing.Tags, p.Tag)
 		refreshedManagedNodes.StoreNode(h, existing)
@@ -251,11 +252,17 @@ func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscriptio
 		if sub.IncrementalAliveNodes() {
 			mergedManagedNodes = subscription.NewManagedNodes()
 			old.RangeNodes(func(h node.Hash, oldNode subscription.ManagedNode) bool {
+				// A relay Platform change changes node identity and must replace the
+				// previous scope even when incremental mode is enabled.
+				entry, entryOK := s.pool.GetEntry(h)
+				if !entryOK || node.HashFromRawOptionsWithRelayPlatform(entry.RawOptions, attemptRelayPlatformID) != h {
+					return true
+				}
 				if oldNode.Evicted {
 					mergedManagedNodes.StoreNode(h, oldNode)
 					return true
 				}
-				if entry, ok := s.pool.GetEntry(h); ok && !shouldRemoveUnhealthyNodeForIncrementalMode(entry) {
+				if !shouldRemoveUnhealthyNodeForIncrementalMode(entry) {
 					mergedManagedNodes.StoreNode(h, oldNode)
 				}
 				return true
@@ -422,6 +429,42 @@ func (s *SubscriptionScheduler) SetSubscriptionEnabled(sub *subscription.Subscri
 			s.onSubReenabledNode(h)
 		}
 	}
+
+	if s.onSubUpdated != nil {
+		s.onSubUpdated(sub)
+	}
+}
+
+// SetSubscriptionRelayPlatformID applies a relay scope change and immediately
+// removes the subscription's old node identities. This keeps the new setting
+// fail-closed while the replacement refresh is running or if that refresh fails.
+func (s *SubscriptionScheduler) SetSubscriptionRelayPlatformID(
+	sub *subscription.Subscription,
+	relayPlatformID string,
+) {
+	if sub == nil || sub.RelayPlatformID() == relayPlatformID {
+		return
+	}
+
+	sub.WithOpLock(func() {
+		if sub.RelayPlatformID() == relayPlatformID {
+			return
+		}
+		oldManagedNodes := sub.ManagedNodes()
+		hashes := make([]node.Hash, 0, oldManagedNodes.Size())
+		oldManagedNodes.RangeNodes(func(hash node.Hash, _ subscription.ManagedNode) bool {
+			hashes = append(hashes, hash)
+			return true
+		})
+
+		// Publish the empty view before removing pool references so tag and
+		// enabled-state lookups observe one consistent fail-closed state.
+		sub.SetRelayPlatformID(relayPlatformID)
+		sub.SwapManagedNodes(subscription.NewManagedNodes())
+		for _, hash := range hashes {
+			s.pool.RemoveNodeFromSub(hash, sub.ID)
+		}
+	})
 
 	if s.onSubUpdated != nil {
 		s.onSubUpdated(sub)

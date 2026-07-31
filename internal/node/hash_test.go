@@ -69,6 +69,26 @@ func TestHashFromRawOptions_InvalidJSON_Fallback(t *testing.T) {
 	}
 }
 
+func TestHashFromRawOptionsWithRelayPlatform_ScopesIdentity(t *testing.T) {
+	rawWithTag := []byte(`{"type":"shadowsocks","tag":"node-a","server":"1.2.3.4","server_port":443}`)
+	rawWithOtherTag := []byte(`{"type":"shadowsocks","tag":"node-b","server":"1.2.3.4","server_port":443}`)
+
+	direct := HashFromRawOptionsWithRelayPlatform(rawWithTag, "")
+	if direct != HashFromRawOptions(rawWithTag) {
+		t.Fatal("direct relay scope must preserve the historical hash")
+	}
+
+	relayA := HashFromRawOptionsWithRelayPlatform(rawWithTag, "11111111-1111-1111-1111-111111111111")
+	relayAOtherTag := HashFromRawOptionsWithRelayPlatform(rawWithOtherTag, "11111111-1111-1111-1111-111111111111")
+	relayB := HashFromRawOptionsWithRelayPlatform(rawWithTag, "22222222-2222-2222-2222-222222222222")
+	if relayA == direct || relayA == relayB {
+		t.Fatal("different relay scopes must produce different identities")
+	}
+	if relayA != relayAOtherTag {
+		t.Fatal("tag must remain ignored inside a relay scope")
+	}
+}
+
 func TestHexRoundTrip(t *testing.T) {
 	raw := []byte(`{"type":"vmess","server":"example.com"}`)
 	original := HashFromRawOptions(raw)

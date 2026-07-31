@@ -25,6 +25,7 @@ type Subscription struct {
 	SourceType                string `json:"source_type"`
 	URL                       string `json:"url"`
 	Content                   string `json:"content"`
+	RelayPlatformID           string `json:"relay_platform_id"`
 	UpdateIntervalNs          int64  `json:"update_interval_ns"`
 	Enabled                   bool   `json:"enabled"`
 	Ephemeral                 bool   `json:"ephemeral"`

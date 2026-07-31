@@ -28,7 +28,7 @@ func closeOutbound(ob adapter.Outbound) {
 	}
 }
 
-func buildOutboundSafely(builder OutboundBuilder, rawOptions json.RawMessage) (ob adapter.Outbound, err error) {
+func buildOutboundSafely(builder OutboundBuilder, rawOptions json.RawMessage, relayPlatformID string) (ob adapter.Outbound, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if ob != nil {
@@ -38,17 +38,28 @@ func buildOutboundSafely(builder OutboundBuilder, rawOptions json.RawMessage) (o
 			err = fmt.Errorf("panic: %v", r)
 		}
 	}()
-	return builder.Build(rawOptions)
+	return builder.Build(rawOptions, relayPlatformID)
 }
 
 // OutboundManager manages outbound lifecycle and provides unified HTTP execution.
 type OutboundManager struct {
-	pool    PoolAccessor
-	builder OutboundBuilder
+	pool                   PoolAccessor
+	builder                OutboundBuilder
+	resolveRelayPlatformID NodeRelayPlatformResolver
 }
 
-func NewOutboundManager(pool PoolAccessor, builder OutboundBuilder) *OutboundManager {
-	return &OutboundManager{pool: pool, builder: builder}
+// NewOutboundManager creates an outbound lifecycle manager. The optional
+// resolver keeps existing direct-only test and embedding callers compatible.
+func NewOutboundManager(
+	pool PoolAccessor,
+	builder OutboundBuilder,
+	resolvers ...NodeRelayPlatformResolver,
+) *OutboundManager {
+	var resolver NodeRelayPlatformResolver
+	if len(resolvers) > 0 {
+		resolver = resolvers[0]
+	}
+	return &OutboundManager{pool: pool, builder: builder, resolveRelayPlatformID: resolver}
 }
 
 func (m *OutboundManager) isLiveEntry(hash node.Hash, entry *node.NodeEntry) bool {
@@ -69,7 +80,17 @@ func (m *OutboundManager) EnsureNodeOutbound(hash node.Hash) {
 		return
 	}
 
-	ob, err := buildOutboundSafely(m.builder, entry.RawOptions)
+	relayPlatformID := ""
+	if m.resolveRelayPlatformID != nil {
+		var err error
+		relayPlatformID, err = m.resolveRelayPlatformID(entry)
+		if err != nil {
+			entry.SetLastError("resolve relay platform: " + err.Error())
+			return
+		}
+	}
+
+	ob, err := buildOutboundSafely(m.builder, entry.RawOptions, relayPlatformID)
 	if err != nil {
 		entry.SetLastError("outbound build: " + err.Error())
 		return
