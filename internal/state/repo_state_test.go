@@ -3,6 +3,7 @@ package state
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"reflect"
 	"strconv"
 	"testing"
@@ -135,6 +136,8 @@ func TestMigrateStateDB_ConvertsLegacyRegexFiltersToMustRules(t *testing.T) {
 		);
 		INSERT INTO platforms (id, regex_filters_json) VALUES
 			('legacy', '["^Provider/.*","!literal","\\!escaped",""]'),
+			('single', '["^Provider/.*"]'),
+			('single-bang', '["!literal"]'),
 			('empty', '[]');
 	`)
 	if err != nil {
@@ -158,6 +161,22 @@ func TestMigrateStateDB_ConvertsLegacyRegexFiltersToMustRules(t *testing.T) {
 		t.Fatalf("migrated filters: got %v, want %v", got, want)
 	}
 
+	for id, want := range map[string][]string{
+		"single":      {"^Provider/.*"},
+		"single-bang": {`\!literal`},
+	} {
+		if err := db.QueryRow(`SELECT regex_filters_json FROM platforms WHERE id = ?`, id).Scan(&raw); err != nil {
+			t.Fatalf("read migrated %s filters: %v", id, err)
+		}
+		got, err = decodeStringSliceJSON(raw)
+		if err != nil {
+			t.Fatalf("decode migrated %s filters: %v", id, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("migrated %s filters: got %v, want %v", id, got, want)
+		}
+	}
+
 	if err := db.QueryRow(`SELECT regex_filters_json FROM platforms WHERE id = 'empty'`).Scan(&raw); err != nil {
 		t.Fatalf("read migrated empty filters: %v", err)
 	}
@@ -167,6 +186,17 @@ func TestMigrateStateDB_ConvertsLegacyRegexFiltersToMustRules(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("migrated empty filters: got %v, want []", got)
+	}
+}
+
+func TestPlatformRegexFilterRulesMigrationIsIrreversible(t *testing.T) {
+	const downMigration = stateMigrationsPath + "/000009_platform_regex_filter_rules.down.sql"
+	file, err := migrationsFS.Open(downMigration)
+	if file != nil {
+		_ = file.Close()
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("open irreversible migration %q: got %v, want fs.ErrNotExist", downMigration, err)
 	}
 }
 

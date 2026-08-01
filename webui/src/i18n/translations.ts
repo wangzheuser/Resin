@@ -640,6 +640,7 @@ Note: Once enabled, requests without authentication information are rejected ins
   "搜索订阅": "Search subscriptions",
   "搜索规则": "Search rules",
   "搜索平台": "Search platforms",
+  "搜索账号": "Search accounts",
   "延迟测试目标 URL 必须是 http/https 地址":
     "Latency test target URL must be an http/https URL",
   "延迟测试目标 URL 不能为空": "Latency test target URL cannot be empty",
@@ -654,6 +655,7 @@ Note: Once enabled, requests without authentication information are rejected ins
     "View current lease bindings for this platform and release individual account leases.",
   "正在加载租约数据...": "Loading leases...",
   "当前平台暂无租约": "No leases for this platform",
+  "没有匹配的租约": "No matching leases",
   "重置、清租约、删除操作": "Reset, clear leases, and delete operations",
   "重建、重置、清租约、删除操作": "Rebuild, reset, clear leases, and delete operations",
   "立即清除当前平台的全部租约，下次请求将重新分配出口。":
