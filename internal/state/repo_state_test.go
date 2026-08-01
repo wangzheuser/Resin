@@ -81,6 +81,10 @@ func TestMigrateStateDB_AddsEnabledToExistingEndpoints(t *testing.T) {
 	_, err = db.Exec(`
 		CREATE TABLE schema_migrations (version uint64 NOT NULL PRIMARY KEY, dirty bool NOT NULL);
 		INSERT INTO schema_migrations (version, dirty) VALUES (7, 0);
+		CREATE TABLE platforms (
+			id TEXT PRIMARY KEY,
+			regex_filters_json TEXT NOT NULL DEFAULT '[]'
+		);
 		CREATE TABLE endpoints (
 			id TEXT PRIMARY KEY,
 			port INTEGER NOT NULL UNIQUE CHECK (port BETWEEN 1 AND 65535),
@@ -111,6 +115,58 @@ func TestMigrateStateDB_AddsEnabledToExistingEndpoints(t *testing.T) {
 	}
 	if !enabled {
 		t.Fatal("existing endpoint should remain enabled after migration")
+	}
+}
+
+func TestMigrateStateDB_ConvertsLegacyRegexFiltersToMustRules(t *testing.T) {
+	dir := t.TempDir()
+	db, err := OpenDB(dir + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE TABLE schema_migrations (version uint64 NOT NULL PRIMARY KEY, dirty bool NOT NULL);
+		INSERT INTO schema_migrations (version, dirty) VALUES (8, 0);
+		CREATE TABLE platforms (
+			id TEXT PRIMARY KEY,
+			regex_filters_json TEXT NOT NULL DEFAULT '[]'
+		);
+		INSERT INTO platforms (id, regex_filters_json) VALUES
+			('legacy', '["^Provider/.*","!literal","\\!escaped",""]'),
+			('empty', '[]');
+	`)
+	if err != nil {
+		t.Fatalf("create version 8 schema: %v", err)
+	}
+
+	if err := MigrateStateDB(db); err != nil {
+		t.Fatalf("MigrateStateDB: %v", err)
+	}
+
+	var raw string
+	if err := db.QueryRow(`SELECT regex_filters_json FROM platforms WHERE id = 'legacy'`).Scan(&raw); err != nil {
+		t.Fatalf("read migrated filters: %v", err)
+	}
+	got, err := decodeStringSliceJSON(raw)
+	if err != nil {
+		t.Fatalf("decode migrated filters: %v", err)
+	}
+	want := []string{"*^Provider/.*", "*!literal", `*\!escaped`, "*"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("migrated filters: got %v, want %v", got, want)
+	}
+
+	if err := db.QueryRow(`SELECT regex_filters_json FROM platforms WHERE id = 'empty'`).Scan(&raw); err != nil {
+		t.Fatalf("read migrated empty filters: %v", err)
+	}
+	got, err = decodeStringSliceJSON(raw)
+	if err != nil {
+		t.Fatalf("decode migrated empty filters: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("migrated empty filters: got %v, want []", got)
 	}
 }
 

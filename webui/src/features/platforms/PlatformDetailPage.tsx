@@ -620,26 +620,19 @@ export function PlatformDetailPage() {
                   </div>
 
                   <div className="field-group">
-                    <label className="field-label field-label-with-info" htmlFor="detail-edit-regex">
-                      <span>{t("节点名正则过滤规则")}</span>
-                      <span
-                        className="subscription-info-icon"
-                        title={t("满足所有正则表达式的节点才会被选择")}
-                        aria-label={t("满足所有正则表达式的节点才会被选择")}
-                        tabIndex={0}
-                      >
-                        <Info size={13} />
-                      </span>
+                    <label className="field-label" htmlFor="detail-edit-regex">
+                      {t("节点名正则过滤规则")}
                     </label>
                     <Textarea
                       id="detail-edit-regex"
                       rows={6}
-                      placeholder={t("每行一条，例如 .*专线.* 或 <订阅名>/.*")}
+                      placeholder={t("每行一条正则表达式，例如：\n\n香港\n日本\n*专线\n!过期\n!失效\n\n表示：选择【香港】或【日本】的【专线】节点，并排除包含【过期】或【失效】的节点。")}
                       {...editForm.register("regex_filters_text")}
                     />
-                    <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
-                      {t("技巧：<订阅名>/.* 可筛选来自该订阅的节点。")}
-                    </p>
+                    <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                      <div>{t("普通正则表达式表示满足其一，* 开头表示必须包含，! 开头表示排除。")}</div>
+                      <div>{t("技巧：^<订阅名>/ 可筛选来自该订阅的节点。")}</div>
+                    </div>
                   </div>
 
                   <div className="field-group">
