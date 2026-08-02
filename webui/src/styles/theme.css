@@ -1481,6 +1481,42 @@ a {
   margin-top: 0;
 }
 
+.subscription-content-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.subscription-content-heading .btn {
+  flex: 0 0 auto;
+}
+
+.subscription-content-collapsed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 64px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft);
+}
+
+.subscription-content-collapsed span {
+  display: grid;
+  gap: 3px;
+}
+
+.subscription-content-collapsed small {
+  color: var(--text-muted);
+}
+
+.subscription-content-collapsed .btn {
+  flex: 0 0 auto;
+}
+
 .rules-table-card .rules-table-wrap {
   margin-top: 0;
 }

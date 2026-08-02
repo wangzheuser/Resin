@@ -95,7 +95,7 @@ func LoadEnvConfig() (*EnvConfig, error) {
 
 	// --- Ports ---
 	cfg.ResinPort = envInt("RESIN_PORT", 2260, &errs)
-	cfg.APIMaxBodyBytes = envInt("RESIN_API_MAX_BODY_BYTES", 1<<20, &errs)
+	cfg.APIMaxBodyBytes = envInt("RESIN_API_MAX_BODY_BYTES", 8<<20, &errs)
 
 	// --- Core ---
 	cfg.MaxLatencyTableEntries = envInt("RESIN_MAX_LATENCY_TABLE_ENTRIES", 12, &errs)

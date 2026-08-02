@@ -49,6 +49,7 @@ export async function listSubscriptions(input: ListSubscriptionsInput = {}): Pro
     offset: String(input.offset ?? 0),
     sort_by: "created_at",
     sort_order: "desc",
+    include_content: "false",
   });
 
   if (input.enabled !== undefined) {
@@ -61,6 +62,11 @@ export async function listSubscriptions(input: ListSubscriptionsInput = {}): Pro
 
   const data = await apiRequest<PageResponse<ApiSubscription>>(`${basePath}?${query.toString()}`);
   return normalizeSubscriptionPage(data);
+}
+
+export async function getSubscription(id: string): Promise<Subscription> {
+  const data = await apiRequest<ApiSubscription>(`${basePath}/${id}`);
+  return normalizeSubscription(data);
 }
 
 export async function createSubscription(input: SubscriptionCreateInput): Promise<Subscription> {

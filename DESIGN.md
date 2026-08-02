@@ -1375,9 +1375,10 @@ API 阻塞到重建完成为止。
 
 #### 列出订阅
 
-**GET** `/subscriptions?enabled=&keyword=&limit=&offset=&sort_by=&sort_order=`
+**GET** `/subscriptions?enabled=&keyword=&include_content=&limit=&offset=&sort_by=&sort_order=`
 
 支持的 `sort_by`：`name`、`created_at`、`last_checked`、`last_updated`。默认按 `created_at` `asc` 排序。
+`include_content=false` 时列表中的 `content` 返回空字符串，客户端可通过 `GET /subscriptions/{subscription_id}` 按需获取完整正文；未传时保持返回正文的兼容行为。
 
 #### 创建订阅
 
@@ -2295,7 +2296,7 @@ GeoIP 与订阅的下载都有错误重试的需求。
 * RESIN_LOG_DIR：日志目录。默认 /var/log/resin
 * RESIN_LISTEN_ADDRESS：Resin 统一监听地址。默认 `0.0.0.0`
 * RESIN_PORT：Resin 单端口（控制面 API + WebUI + HTTP 正向代理 + SOCKS5 正向代理 + 反向代理）。默认 2260
-* RESIN_API_MAX_BODY_BYTES：控制面 API（`/api/*`）请求体最大字节数。超限返回 `413 PAYLOAD_TOO_LARGE`。仅作用于控制面，不作用于 HTTP 正向代理 / SOCKS5 正向代理 / 反向代理数据面。默认 1048576（1 MiB）。
+* RESIN_API_MAX_BODY_BYTES：控制面 API（`/api/*`）请求体最大字节数。超限返回 `413 PAYLOAD_TOO_LARGE`。仅作用于控制面，不作用于 HTTP 正向代理 / SOCKS5 正向代理 / 反向代理数据面。默认 8388608（8 MiB）。
 
 核心设置：
 * `RESIN_MAX_LATENCY_TABLE_ENTRIES`：每个节点延迟表中“普通站点 LRU 区”的最大表项数。默认 12，最大 32（超限启动失败）。

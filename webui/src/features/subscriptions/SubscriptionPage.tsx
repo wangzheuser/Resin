@@ -1,8 +1,8 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { AlertTriangle, ArrowRight, Eye, Filter, Info, Pencil, Plus, RefreshCw, Route, Search, Sparkles, Trash2, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, ArrowRight, Eye, Filter, Info, Pencil, Plus, RefreshCw, Route, Search, Sparkles, Trash2, Upload, X } from "lucide-react";
+import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { Link } from "react-router-dom";
 import { z } from "zod";
@@ -26,10 +26,12 @@ import {
   cleanupSubscriptionCircuitOpenNodes,
   createSubscription,
   deleteSubscription,
+  getSubscription,
   listSubscriptions,
   refreshSubscription,
   updateSubscription,
 } from "./api";
+import { mergeUniqueSubscriptionLines } from "./import-text";
 import type { Subscription } from "./types";
 
 type EnabledFilter = "all" | "enabled" | "disabled";
@@ -77,6 +79,7 @@ const EMPTY_SUBSCRIPTIONS: Subscription[] = [];
 const EMPTY_PLATFORMS: Platform[] = [];
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
 const LOCAL_SOURCE_UPDATE_INTERVAL = "12h";
+const LARGE_SUBSCRIPTION_CONTENT_LENGTH = 256 * 1024;
 const SUBSCRIPTION_DISABLE_HINT = "禁用订阅后，相关节点不会参与平台路由、健康统计或自动探测。";
 const SUBSCRIPTION_EPHEMERAL_HINT = "临时订阅的非健康节点会在一段时间后被自动删除。订阅本身不会被删除。";
 const SUBSCRIPTION_INCREMENTAL_HINT = "开启后刷新时保留当前仍存活的旧节点，仅清理失效旧节点，并合并新订阅内容；关闭后仅保留刷新后的订阅内容。";
@@ -219,9 +222,16 @@ export function SubscriptionPage() {
   const [selectedSubscriptionId, setSelectedSubscriptionId] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [createContentEditorExpanded, setCreateContentEditorExpanded] = useState(true);
+  const [createContentLength, setCreateContentLength] = useState(0);
+  const [editContentEditorExpanded, setEditContentEditorExpanded] = useState(true);
+  const [editContentLength, setEditContentLength] = useState(0);
+  const [editFormSubscriptionId, setEditFormSubscriptionId] = useState("");
   const [pendingRefreshIds, setPendingRefreshIds] = useState<Set<string>>(() => new Set());
   const { toasts, showToast, dismissToast } = useToast();
   const pendingRefreshIdsRef = useRef<Set<string>>(new Set());
+  const createImportInputRef = useRef<HTMLInputElement>(null);
+  const editImportInputRef = useRef<HTMLInputElement>(null);
 
   const queryClient = useQueryClient();
   const enabledValue = parseEnabledFilter(enabledFilter);
@@ -276,6 +286,13 @@ export function SubscriptionPage() {
 
   const drawerVisible = drawerOpen && Boolean(selectedSubscription);
 
+  const subscriptionDetailQuery = useQuery({
+    queryKey: ["subscription", selectedSubscriptionId],
+    queryFn: () => getSubscription(selectedSubscriptionId),
+    enabled: drawerVisible,
+    staleTime: 30_000,
+  });
+
   const createForm = useForm<SubscriptionCreateForm>({
     resolver: zodResolver(subscriptionCreateSchema),
     defaultValues: {
@@ -317,11 +334,15 @@ export function SubscriptionPage() {
   const editRelayPlatformID = editForm.watch("relay_platform_id");
 
   useEffect(() => {
-    if (!selectedSubscription) {
+    if (!drawerOpen || !subscriptionDetailQuery.data) {
       return;
     }
-    editForm.reset(subscriptionToEditForm(selectedSubscription));
-  }, [selectedSubscription, editForm]);
+    const contentLength = subscriptionDetailQuery.data.content.length;
+    editForm.reset(subscriptionToEditForm(subscriptionDetailQuery.data));
+    setEditContentLength(contentLength);
+    setEditContentEditorExpanded(contentLength < LARGE_SUBSCRIPTION_CONTENT_LENGTH);
+    setEditFormSubscriptionId(subscriptionDetailQuery.data.id);
+  }, [drawerOpen, subscriptionDetailQuery.data, editForm]);
 
   useEffect(() => {
     if (!drawerVisible) {
@@ -350,6 +371,36 @@ export function SubscriptionPage() {
     ]);
   };
 
+  const importLocalSubscriptionFiles = async (
+    event: ChangeEvent<HTMLInputElement>,
+    currentContent: string,
+    setContent: (content: string) => void,
+    setContentLength: (length: number) => void,
+    setEditorExpanded: (expanded: boolean) => void,
+  ) => {
+    const input = event.currentTarget;
+    const files = Array.from(input.files ?? []);
+    if (files.length === 0) {
+      return;
+    }
+
+    if (currentContent.length + files.reduce((total, file) => total + file.size, 0) >= LARGE_SUBSCRIPTION_CONTENT_LENGTH) {
+      setEditorExpanded(false);
+    }
+
+    try {
+      const result = mergeUniqueSubscriptionLines(currentContent, await Promise.all(files.map((file) => file.text())));
+      setContent(result.content);
+      setContentLength(result.content.length);
+      setEditorExpanded(result.content.length < LARGE_SUBSCRIPTION_CONTENT_LENGTH);
+      showToast("success", t("已导入 {{added}} 条，跳过 {{duplicates}} 条重复内容", result));
+    } catch {
+      showToast("error", t("读取订阅文本文件失败"));
+    } finally {
+      input.value = "";
+    }
+  };
+
   const createMutation = useMutation({
     mutationFn: createSubscription,
     onSuccess: async (created) => {
@@ -367,6 +418,8 @@ export function SubscriptionPage() {
         ephemeral: false,
         incremental_alive_nodes: false,
       });
+      setCreateContentEditorExpanded(true);
+      setCreateContentLength(0);
       showToast("success", t("订阅 {{name}} 创建成功", { name: created.name }));
     },
     onError: (error) => {
@@ -390,11 +443,14 @@ export function SubscriptionPage() {
         relay_platform_id: formData.relay_platform_id,
         ...(formData.source_type === "remote"
           ? { url: formData.url.trim() }
-          : { content: formData.content }),
+          : editForm.getFieldState("content").isDirty
+            ? { content: formData.content }
+            : {}),
       };
       return updateSubscription(selectedSubscription.id, payload);
     },
     onSuccess: async (updated) => {
+      queryClient.setQueryData(["subscription", updated.id], updated);
       await invalidateSubscriptions();
       setSelectedSubscriptionId(updated.id);
       showToast("success", t("订阅 {{name}} 已更新", { name: updated.name }));
@@ -518,6 +574,7 @@ export function SubscriptionPage() {
   };
 
   const openDrawer = useCallback((subscription: Subscription) => {
+    setEditFormSubscriptionId("");
     setSelectedSubscriptionId(subscription.id);
     setDrawerOpen(true);
   }, []);
@@ -831,6 +888,16 @@ export function SubscriptionPage() {
                   <div className="callout callout-success">{t("最近一次刷新无错误")}</div>
                 )}
 
+                {subscriptionDetailQuery.isError ? (
+                  <div className="callout callout-error">
+                    <AlertTriangle size={14} />
+                    <span>{formatApiErrorMessage(subscriptionDetailQuery.error, t)}</span>
+                  </div>
+                ) : subscriptionDetailQuery.isLoading
+                  || !subscriptionDetailQuery.data
+                  || subscriptionDetailQuery.data.id !== editFormSubscriptionId ? (
+                  <p className="muted">{t("正在加载订阅详情...")}</p>
+                ) : (
                 <form className="form-grid" onSubmit={onEditSubmit}>
                   <input type="hidden" {...editForm.register("source_type")} />
 
@@ -889,16 +956,58 @@ export function SubscriptionPage() {
                     </>
                   ) : (
                     <div className="field-group field-span-2">
-                      <label className="field-label" htmlFor="edit-sub-content">
-                        {t("订阅内容")}
-                      </label>
-                      <Textarea
-                        id="edit-sub-content"
-                        rows={8}
-                        placeholder={subscriptionContentPlaceholder}
-                        invalid={Boolean(editForm.formState.errors.content)}
-                        {...editForm.register("content")}
-                      />
+                      <div className="subscription-content-heading">
+                        <label className="field-label" htmlFor={editContentEditorExpanded ? "edit-sub-content" : undefined}>
+                          {t("订阅内容")}
+                        </label>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          title={t("导入 TXT")}
+                          onClick={() => editImportInputRef.current?.click()}
+                        >
+                          <Upload size={14} />
+                          {t("导入 TXT")}
+                        </Button>
+                        <input
+                          ref={editImportInputRef}
+                          type="file"
+                          accept=".txt,text/plain"
+                          multiple
+                          hidden
+                          aria-label={t("导入 TXT")}
+                          onChange={(event) => void importLocalSubscriptionFiles(
+                            event,
+                            editForm.getValues("content"),
+                            (content) => {
+                              editForm.setValue("content", content, { shouldDirty: true });
+                              editForm.clearErrors("content");
+                            },
+                            setEditContentLength,
+                            setEditContentEditorExpanded,
+                          )}
+                        />
+                      </div>
+                      {editContentEditorExpanded ? (
+                        <Textarea
+                          id="edit-sub-content"
+                          rows={8}
+                          placeholder={subscriptionContentPlaceholder}
+                          invalid={Boolean(editForm.formState.errors.content)}
+                          {...editForm.register("content")}
+                        />
+                      ) : (
+                        <div className="subscription-content-collapsed">
+                          <span>
+                            {t("正文较大，已折叠以保持页面流畅")}
+                            <small>{t("{{count}} 个字符", { count: editContentLength.toLocaleString() })}</small>
+                          </span>
+                          <Button size="sm" variant="secondary" onClick={() => setEditContentEditorExpanded(true)}>
+                            <Eye size={14} />
+                            {t("展开编辑")}
+                          </Button>
+                        </div>
+                      )}
                       {editForm.formState.errors.content?.message ? (
                         <p className="field-error">{t(editForm.formState.errors.content.message)}</p>
                       ) : null}
@@ -996,6 +1105,7 @@ export function SubscriptionPage() {
                     </Button>
                   </div>
                 </form>
+                )}
               </section>
 
               <section className="platform-drawer-section platform-ops-section">
@@ -1134,16 +1244,58 @@ export function SubscriptionPage() {
                 </>
               ) : (
                 <div className="field-group field-span-2">
-                  <label className="field-label" htmlFor="create-sub-content">
-                    {t("订阅内容")}
-                  </label>
-                  <Textarea
-                    id="create-sub-content"
-                    rows={8}
-                    placeholder={subscriptionContentPlaceholder}
-                    invalid={Boolean(createForm.formState.errors.content)}
-                    {...createForm.register("content")}
-                  />
+                  <div className="subscription-content-heading">
+                    <label className="field-label" htmlFor={createContentEditorExpanded ? "create-sub-content" : undefined}>
+                      {t("订阅内容")}
+                    </label>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      title={t("导入 TXT")}
+                      onClick={() => createImportInputRef.current?.click()}
+                    >
+                      <Upload size={14} />
+                      {t("导入 TXT")}
+                    </Button>
+                    <input
+                      ref={createImportInputRef}
+                      type="file"
+                      accept=".txt,text/plain"
+                      multiple
+                      hidden
+                      aria-label={t("导入 TXT")}
+                      onChange={(event) => void importLocalSubscriptionFiles(
+                        event,
+                        createForm.getValues("content"),
+                        (content) => {
+                          createForm.setValue("content", content, { shouldDirty: true });
+                          createForm.clearErrors("content");
+                        },
+                        setCreateContentLength,
+                        setCreateContentEditorExpanded,
+                      )}
+                    />
+                  </div>
+                  {createContentEditorExpanded ? (
+                    <Textarea
+                      id="create-sub-content"
+                      rows={8}
+                      placeholder={subscriptionContentPlaceholder}
+                      invalid={Boolean(createForm.formState.errors.content)}
+                      {...createForm.register("content")}
+                    />
+                  ) : (
+                    <div className="subscription-content-collapsed">
+                      <span>
+                        {t("正文较大，已折叠以保持页面流畅")}
+                        <small>{t("{{count}} 个字符", { count: createContentLength.toLocaleString() })}</small>
+                      </span>
+                      <Button size="sm" variant="secondary" onClick={() => setCreateContentEditorExpanded(true)}>
+                        <Eye size={14} />
+                        {t("展开编辑")}
+                      </Button>
+                    </div>
+                  )}
                   {createForm.formState.errors.content?.message ? (
                     <p className="field-error">{t(createForm.formState.errors.content.message)}</p>
                   ) : null}

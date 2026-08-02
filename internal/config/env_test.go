@@ -40,7 +40,7 @@ func TestLoadEnvConfig_Defaults(t *testing.T) {
 
 	// Ports
 	assertEqual(t, "ResinPort", cfg.ResinPort, 2260)
-	assertEqual(t, "APIMaxBodyBytes", cfg.APIMaxBodyBytes, 1<<20)
+	assertEqual(t, "APIMaxBodyBytes", cfg.APIMaxBodyBytes, 8<<20)
 
 	// Core
 	assertEqual(t, "MaxLatencyTableEntries", cfg.MaxLatencyTableEntries, 12)

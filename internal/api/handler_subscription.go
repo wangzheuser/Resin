@@ -49,10 +49,19 @@ func HandleListSubscriptions(cp *service.ControlPlaneService) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		includeContent, ok := parseBoolQueryOrWriteInvalid(w, r, "include_content")
+		if !ok {
+			return
+		}
 		subs, err := cp.ListSubscriptions(enabled)
 		if err != nil {
 			writeServiceError(w, err)
 			return
+		}
+		if includeContent != nil && !*includeContent {
+			for i := range subs {
+				subs[i].Content = ""
+			}
 		}
 		subs = filterSubscriptionsByKeyword(subs, r.URL.Query().Get("keyword"))
 
