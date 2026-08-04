@@ -269,18 +269,24 @@ func newTopologyRuntime(
 	})
 	log.Println("Topology: GlobalNodePool initialized")
 	relayPlatformResolver := newNodeRelayPlatformResolver(subManager)
+	var probeMgr *probe.ProbeManager
 
 	singboxBuilder, err := outbound.NewSingboxBuilderWithConfig(outbound.SingboxBuilderConfig{
 		DNSUpstreams:           envCfg.NodeDNSUpstreams,
 		RelayPool:              pool,
 		ResolveRelayPlatformID: relayPlatformResolver,
+		OnRelayCandidateFailure: func(hash node.Hash) {
+			if probeMgr != nil {
+				probeMgr.TriggerImmediateEgressProbe(hash)
+			}
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("singbox builder: %w", err)
 	}
 	outboundMgr := outbound.NewOutboundManager(pool, outbound.NewHybridBuilder(singboxBuilder), relayPlatformResolver)
 
-	probeMgr := probe.NewProbeManager(probe.ProbeConfig{
+	probeMgr = probe.NewProbeManager(probe.ProbeConfig{
 		Pool:        pool,
 		Concurrency: envCfg.ProbeConcurrency,
 		Fetcher: func(hash node.Hash, url string) ([]byte, time.Duration, error) {

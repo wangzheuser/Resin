@@ -15,7 +15,9 @@ import (
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing/common"
 	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
 const (
@@ -71,6 +73,7 @@ type platformRelayDialer struct {
 	pool                   RelayPoolAccessor
 	platformID             string
 	resolveRelayPlatformID NodeRelayPlatformResolver
+	onCandidateFailure     func(node.Hash)
 	cursor                 atomic.Uint64
 }
 
@@ -79,11 +82,13 @@ func newPlatformRelayDialer(
 	pool RelayPoolAccessor,
 	platformID string,
 	resolveRelayPlatformID NodeRelayPlatformResolver,
+	onCandidateFailure func(node.Hash),
 ) *platformRelayDialer {
 	return &platformRelayDialer{
 		pool:                   pool,
 		platformID:             platformID,
 		resolveRelayPlatformID: resolveRelayPlatformID,
+		onCandidateFailure:     onCandidateFailure,
 	}
 }
 
@@ -103,16 +108,34 @@ func (d *platformRelayDialer) DialContext(
 	start := int(d.cursor.Add(1)-1) % len(candidates)
 	var dialErrors []error
 	for i := 0; i < attempts; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		candidate := candidates[(start+i)%len(candidates)]
 		conn, dialErr := candidate.outbound.DialContext(ctx, network, destination)
 		if dialErr == nil {
+			if earlyConn, ok := common.Cast[N.EarlyConn](conn); ok && earlyConn.NeedHandshake() {
+				_, dialErr = conn.Write(nil)
+			}
+		}
+		if dialErr == nil {
 			return conn, nil
 		}
+		if conn != nil {
+			_ = conn.Close()
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if errors.Is(dialErr, context.Canceled) {
+			return nil, dialErr
+		}
+		d.notifyCandidateFailure(candidate.hash)
 		dialErrors = append(dialErrors, fmt.Errorf("candidate %s: %w", candidate.hash.Hex(), dialErr))
 	}
 	return nil, &RelayDialError{
 		PlatformID: d.platformID,
-		Attempts:   attempts,
+		Attempts:   len(dialErrors),
 		Err:        errors.Join(dialErrors...),
 	}
 }
@@ -131,17 +154,36 @@ func (d *platformRelayDialer) ListenPacket(
 	start := int(d.cursor.Add(1)-1) % len(candidates)
 	var dialErrors []error
 	for i := 0; i < attempts; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		candidate := candidates[(start+i)%len(candidates)]
 		packetConn, dialErr := candidate.outbound.ListenPacket(ctx, destination)
 		if dialErr == nil {
 			return packetConn, nil
 		}
+		if packetConn != nil {
+			_ = packetConn.Close()
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if errors.Is(dialErr, context.Canceled) {
+			return nil, dialErr
+		}
+		d.notifyCandidateFailure(candidate.hash)
 		dialErrors = append(dialErrors, fmt.Errorf("candidate %s: %w", candidate.hash.Hex(), dialErr))
 	}
 	return nil, &RelayDialError{
 		PlatformID: d.platformID,
-		Attempts:   attempts,
+		Attempts:   len(dialErrors),
 		Err:        errors.Join(dialErrors...),
+	}
+}
+
+func (d *platformRelayDialer) notifyCandidateFailure(hash node.Hash) {
+	if d.onCandidateFailure != nil {
+		d.onCandidateFailure(hash)
 	}
 }
 
@@ -173,7 +215,7 @@ func (d *platformRelayDialer) snapshotCandidates(
 	candidates := make([]relayCandidate, 0, len(hashes))
 	for _, hash := range hashes {
 		entry, exists := d.pool.GetEntry(hash)
-		if !exists || entry == nil || rawOutboundHasDetour(entry.RawOptions) {
+		if !exists || entry == nil || !entry.IsHealthy() || rawOutboundHasDetour(entry.RawOptions) {
 			continue
 		}
 		if d.resolveRelayPlatformID == nil {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Resinat/Resin/internal/node"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/endpoint"
 	"github.com/sagernet/sing-box/adapter/inbound"
@@ -33,8 +34,9 @@ type SingboxBuilderConfig struct {
 	DNSUpstreams []string
 	// RelayPool and ResolveRelayPlatformID enable subscription-level single-hop
 	// relay Platforms. Direct-only callers may leave both unset.
-	RelayPool              RelayPoolAccessor
-	ResolveRelayPlatformID NodeRelayPlatformResolver
+	RelayPool               RelayPoolAccessor
+	ResolveRelayPlatformID  NodeRelayPlatformResolver
+	OnRelayCandidateFailure func(node.Hash)
 }
 
 // ---------------------------------------------------------------------------
@@ -45,15 +47,16 @@ type SingboxBuilderConfig struct {
 // It holds a fully-wired context with DNS services so that domain-based
 // outbound servers can be resolved.
 type SingboxBuilder struct {
-	registry               *sbOutbound.Registry
-	ctx                    context.Context
-	logFactory             log.Factory
-	dnsTransportManager    *dns.TransportManager
-	dnsRouter              *dns.Router
-	outboundManager        *sbOutbound.Manager
-	relayPool              RelayPoolAccessor
-	resolveRelayPlatformID NodeRelayPlatformResolver
-	relayMu                sync.Mutex
+	registry                *sbOutbound.Registry
+	ctx                     context.Context
+	logFactory              log.Factory
+	dnsTransportManager     *dns.TransportManager
+	dnsRouter               *dns.Router
+	outboundManager         *sbOutbound.Manager
+	relayPool               RelayPoolAccessor
+	resolveRelayPlatformID  NodeRelayPlatformResolver
+	onRelayCandidateFailure func(node.Hash)
+	relayMu                 sync.Mutex
 }
 
 // NewSingboxBuilderWithConfig creates a SingboxBuilder with a complete
@@ -130,19 +133,20 @@ func NewSingboxBuilderWithConfig(cfg SingboxBuilderConfig) (*SingboxBuilder, err
 			if strings.TrimSpace(options.PlatformID) == "" {
 				return nil, fmt.Errorf("relay platform id is required")
 			}
-			dialer := newPlatformRelayDialer(cfg.RelayPool, options.PlatformID, cfg.ResolveRelayPlatformID)
+			dialer := newPlatformRelayDialer(cfg.RelayPool, options.PlatformID, cfg.ResolveRelayPlatformID, cfg.OnRelayCandidateFailure)
 			return newRelayPlatformOutbound(tag, dialer), nil
 		})
 
 	return &SingboxBuilder{
-		registry:               registry,
-		ctx:                    ctx,
-		logFactory:             logFactory,
-		dnsTransportManager:    dnsTransportMgr,
-		dnsRouter:              dnsRouter,
-		outboundManager:        outboundMgr,
-		relayPool:              cfg.RelayPool,
-		resolveRelayPlatformID: cfg.ResolveRelayPlatformID,
+		registry:                registry,
+		ctx:                     ctx,
+		logFactory:              logFactory,
+		dnsTransportManager:     dnsTransportMgr,
+		dnsRouter:               dnsRouter,
+		outboundManager:         outboundMgr,
+		relayPool:               cfg.RelayPool,
+		resolveRelayPlatformID:  cfg.ResolveRelayPlatformID,
+		onRelayCandidateFailure: cfg.OnRelayCandidateFailure,
 	}, nil
 }
 
@@ -203,7 +207,7 @@ func (b *SingboxBuilder) RelayDialer(platformID string) (*platformRelayDialer, e
 	if _, ok := b.relayPool.GetPlatform(platformID); !ok {
 		return nil, fmt.Errorf("%w: %s", ErrRelayPlatformNotFound, platformID)
 	}
-	return newPlatformRelayDialer(b.relayPool, platformID, b.resolveRelayPlatformID), nil
+	return newPlatformRelayDialer(b.relayPool, platformID, b.resolveRelayPlatformID, b.onRelayCandidateFailure), nil
 }
 
 // ensureRelayPlatformOutbound registers one shared dynamic detour per Platform.

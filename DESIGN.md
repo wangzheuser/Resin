@@ -344,7 +344,7 @@ Resin 从订阅中获取节点配置。
 * 候选节点必须位于被引用 Platform 的当前 View 中，拥有可用 Outbound，支持当前网络类型，且其所属订阅的 `RelayPlatformID` 为空、原始配置中的 `detour` 为空。
 * 选择器按共享游标轮询候选；每次拨号最多尝试 3 个。候选为空或全部尝试失败时返回带 Platform ID 与尝试次数的错误，保持 fail-closed。
 * 先快照 View 中的 Hash，再执行节点检查和网络拨号，避免在 `RoutableView.Range` 的分片读锁内进行 I/O。
-* 前置节点失败不直接记为前置节点的被动失败，因为该结果同时包含“前置节点到目标节点”的路径因素；前置节点健康由独立探测维护。
+* 前置节点失败不直接记为前置节点的被动失败，因为该结果同时包含“前置节点到目标节点”的路径因素；失败会触发该节点的独立即时出口复检，由探测结果维护其健康状态。
 * sing-box 节点通过内部 `resin-relay-platform-<PlatformID>` detour 接入；VLESS XHTTP 通过 mihomo 的 `DialerForAPI` 接入同一个选择器。持久化的原始节点 JSON 保持不变。
 * 节点 Hash 按 `raw options + RelayPlatformID` 作用域化。空 ID 完全沿用历史 Hash；相同配置经不同 Platform 转发时形成不同节点身份。
 * 删除 Platform 前检查订阅引用并返回冲突；修改 Platform 的过滤条件后，动态 View 直接影响后续连接，无需重建目标节点 Outbound。

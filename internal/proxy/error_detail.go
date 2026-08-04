@@ -175,5 +175,8 @@ func isClientReadResetError(err error) bool {
 	}
 
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "connection reset by peer") || strings.Contains(msg, "software caused connection abort")
+	return strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "software caused connection abort") ||
+		strings.Contains(msg, "forcibly closed by the remote host") ||
+		strings.Contains(msg, "connection was aborted by the software in your host machine")
 }

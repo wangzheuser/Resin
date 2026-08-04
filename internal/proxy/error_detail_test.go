@@ -74,3 +74,17 @@ func TestIsBenignTunnelCopyError(t *testing.T) {
 		})
 	}
 }
+
+func TestIsClientReadResetError(t *testing.T) {
+	cases := []string{
+		"read tcp: connection reset by peer",
+		"read tcp: software caused connection abort",
+		"wsarecv: An existing connection was forcibly closed by the remote host.",
+		"wsarecv: An established connection was aborted by the software in your host machine.",
+	}
+	for _, message := range cases {
+		if !isClientReadResetError(errors.New(message)) {
+			t.Fatalf("expected client reset error: %q", message)
+		}
+	}
+}
