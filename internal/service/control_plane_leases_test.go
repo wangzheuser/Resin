@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/netip"
 	"testing"
 	"time"
@@ -205,15 +206,106 @@ func TestListLeases_NodeTagUsesEarliestSubscriptionThenMinTag(t *testing.T) {
 		LastAccessedNs: now,
 	})
 
-	leases, err := cp.ListLeases(plat.ID)
+	leases, total, err := cp.ListLeasesPage(plat.ID, LeaseListOptions{
+		SortBy: "expiry",
+		Limit:  50,
+	})
 	if err != nil {
-		t.Fatalf("ListLeases: %v", err)
+		t.Fatalf("ListLeasesPage: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("total: got %d, want 1", total)
 	}
 	if len(leases) != 1 {
 		t.Fatalf("leases len: got %d, want 1", len(leases))
 	}
 	if leases[0].NodeTag != "OldSub/a" {
 		t.Fatalf("node_tag: got %q, want %q", leases[0].NodeTag, "OldSub/a")
+	}
+}
+
+func TestListLeasesPage_FiltersSortsAndPaginatesBeforeFormatting(t *testing.T) {
+	cp, plat := newLeaseInheritanceTestService()
+	hash := node.HashFromRawOptions([]byte(`{"id":"lease-list-page"}`)).Hex()
+
+	for _, lease := range []model.Lease{
+		{PlatformID: plat.ID, Account: "alpha", NodeHash: hash, EgressIP: "203.0.113.1", ExpiryNs: 300, LastAccessedNs: 30},
+		{PlatformID: plat.ID, Account: "BETA-user", NodeHash: hash, EgressIP: "203.0.113.2", ExpiryNs: 100, LastAccessedNs: 20},
+		{PlatformID: plat.ID, Account: "gamma-user", NodeHash: hash, EgressIP: "203.0.113.3", ExpiryNs: 100, LastAccessedNs: 10},
+	} {
+		seedLease(t, cp, lease)
+	}
+
+	page, total, err := cp.ListLeasesPage(plat.ID, LeaseListOptions{
+		Account:   "user",
+		Fuzzy:     true,
+		SortBy:    "expiry",
+		SortOrder: "asc",
+		Limit:     1,
+		Offset:    1,
+	})
+	if err != nil {
+		t.Fatalf("ListLeasesPage: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("total: got %d, want 2", total)
+	}
+	if len(page) != 1 || page[0].Account != "gamma-user" {
+		t.Fatalf("page: got %+v, want gamma-user", page)
+	}
+}
+
+func TestListLeasesPage_ExactAccountUsesPaginationSemantics(t *testing.T) {
+	cp, plat := newLeaseInheritanceTestService()
+	hash := node.HashFromRawOptions([]byte(`{"id":"lease-list-exact"}`)).Hex()
+	seedLease(t, cp, model.Lease{
+		PlatformID:     plat.ID,
+		Account:        "alice",
+		NodeHash:       hash,
+		EgressIP:       "203.0.113.10",
+		ExpiryNs:       200,
+		LastAccessedNs: 100,
+	})
+
+	page, total, err := cp.ListLeasesPage(plat.ID, LeaseListOptions{
+		Account: "alice",
+		Limit:   50,
+		Offset:  1,
+	})
+	if err != nil {
+		t.Fatalf("ListLeasesPage: %v", err)
+	}
+	if total != 1 || len(page) != 0 {
+		t.Fatalf("page: total=%d items=%d, want total=1 items=0", total, len(page))
+	}
+}
+
+func BenchmarkListLeasesPage100k(b *testing.B) {
+	cp, plat := newLeaseInheritanceTestService()
+	hash := node.HashFromRawOptions([]byte(`{"id":"lease-list-benchmark"}`)).Hex()
+	for i := 0; i < 100_000; i++ {
+		if err := cp.Router.UpsertLease(model.Lease{
+			PlatformID:     plat.ID,
+			Account:        fmt.Sprintf("account-%06d", i),
+			NodeHash:       hash,
+			EgressIP:       "203.0.113.10",
+			ExpiryNs:       int64(100_000 - i),
+			LastAccessedNs: int64(i),
+		}); err != nil {
+			b.Fatalf("UpsertLease: %v", err)
+		}
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, err := cp.ListLeasesPage(plat.ID, LeaseListOptions{
+			SortBy:    "expiry",
+			SortOrder: "asc",
+			Limit:     50,
+		}); err != nil {
+			b.Fatalf("ListLeasesPage: %v", err)
+		}
 	}
 }
 

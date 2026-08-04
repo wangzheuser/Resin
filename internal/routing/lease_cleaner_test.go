@@ -11,6 +11,16 @@ import (
 	"github.com/Resinat/Resin/internal/platform"
 )
 
+func TestLeaseCleaner_DefaultCadence(t *testing.T) {
+	cleaner := NewLeaseCleaner(newTestRouter(newRouterTestPool(), nil))
+	if cleaner.minInterval != time.Minute {
+		t.Fatalf("minInterval: got %s, want %s", cleaner.minInterval, time.Minute)
+	}
+	if cleaner.jitterRange != 15*time.Second {
+		t.Fatalf("jitterRange: got %s, want %s", cleaner.jitterRange, 15*time.Second)
+	}
+}
+
 func TestLeaseCleaner_StopWaitsForInFlightSweep(t *testing.T) {
 	pool := newRouterTestPool()
 	plat := platform.NewPlatform("plat-stop", "Plat-Stop", nil, nil)

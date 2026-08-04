@@ -12,6 +12,8 @@ import (
 	"os"
 	"strings"
 	"syscall"
+
+	ws "github.com/sagernet/ws"
 )
 
 const maxUpstreamErrMsgLen = 512
@@ -30,8 +32,25 @@ func summarizeUpstreamError(err error) upstreamErrorDetail {
 		Errno:   extractErrnoCode(err),
 		Message: sanitizeUpstreamErrMsg(err.Error()),
 	}
+	if status, ok := extractHTTPStatusCode(err); ok {
+		detail.Kind = "http_status_error"
+		detail.Errno = fmt.Sprintf("HTTP_%d", status)
+		return detail
+	}
 	detail.Kind = classifyUpstreamErrKind(err, detail.Errno)
 	return detail
+}
+
+func extractHTTPStatusCode(err error) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+	var statusErr ws.StatusError
+	if !errors.As(err, &statusErr) {
+		return 0, false
+	}
+	status := int(statusErr)
+	return status, status >= 100 && status <= 599
 }
 
 func classifyUpstreamErrKind(err error, errno string) string {

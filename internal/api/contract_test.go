@@ -608,6 +608,24 @@ func TestAPIContract_ListLeases_FuzzyValidation(t *testing.T) {
 	assertErrorCode(t, rec, "INVALID_ARGUMENT")
 }
 
+func TestAPIContract_ListLeases_PageLimit(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+	platformID := mustCreatePlatform(t, srv, "lease-page-limit")
+
+	rec := doJSONRequest(
+		t,
+		srv,
+		http.MethodGet,
+		"/api/v1/platforms/"+platformID+"/leases?limit=1001",
+		nil,
+		true,
+	)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("list leases page limit status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+}
+
 func TestAPIContract_PaginationAndSorting(t *testing.T) {
 	srv, _, _ := newControlPlaneTestServer(t)
 

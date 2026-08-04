@@ -9,23 +9,14 @@ import (
 	"github.com/Resinat/Resin/internal/service"
 )
 
+const maxLeasePageLimit = 1000
+
 func validateAccountPath(r *http.Request) (string, error) {
 	account := PathParam(r, "account")
 	if strings.TrimSpace(account) == "" {
 		return "", invalidArgumentError("account: must be non-empty")
 	}
 	return account, nil
-}
-
-func leaseSortKey(sortBy string, l service.LeaseResponse) string {
-	switch sortBy {
-	case "expiry":
-		return l.Expiry
-	case "last_accessed":
-		return l.LastAccessed
-	default:
-		return l.Account
-	}
 }
 
 func compareIPLoadEntries(sortBy string, a, b service.IPLoadEntry) int {
@@ -55,56 +46,53 @@ func HandleListLeases(cp *service.ControlPlaneService) http.HandlerFunc {
 			return
 		}
 
-		leases, err := cp.ListLeases(platformID)
-		if err != nil {
-			writeServiceError(w, err)
-			return
-		}
-
 		fuzzy, ok := parseStrictBoolQuery(w, r, "fuzzy")
 		if !ok {
 			return
 		}
 		useFuzzyAccountMatch := fuzzy != nil && *fuzzy
 
-		// Optional account filter.
+		account := ""
 		if raw := r.URL.Query().Get("account"); raw != "" {
-			account := strings.TrimSpace(raw)
+			account = strings.TrimSpace(raw)
 			if account == "" {
 				writeInvalidArgument(w, "account query: must be non-empty when provided")
 				return
 			}
-			filtered := make([]service.LeaseResponse, 0, len(leases))
-			if useFuzzyAccountMatch {
-				accountLower := strings.ToLower(account)
-				for _, l := range leases {
-					if strings.Contains(strings.ToLower(l.Account), accountLower) {
-						filtered = append(filtered, l)
-					}
-				}
-			} else {
-				for _, l := range leases {
-					if l.Account == account {
-						filtered = append(filtered, l)
-					}
-				}
-			}
-			leases = filtered
 		}
 
 		sorting, ok := parseSortingOrWriteInvalid(w, r, []string{"account", "expiry", "last_accessed"}, "expiry", "asc")
 		if !ok {
 			return
 		}
-		SortSlice(leases, sorting, func(l service.LeaseResponse) string {
-			return leaseSortKey(sorting.SortBy, l)
-		})
-
 		pg, ok := parsePaginationOrWriteInvalid(w, r)
 		if !ok {
 			return
 		}
-		WritePage(w, http.StatusOK, leases, pg)
+		if pg.Limit > maxLeasePageLimit {
+			writeInvalidArgument(w, "limit: must be <= 1000 for lease listings")
+			return
+		}
+
+		leases, total, err := cp.ListLeasesPage(platformID, service.LeaseListOptions{
+			Account:   account,
+			Fuzzy:     useFuzzyAccountMatch,
+			SortBy:    sorting.SortBy,
+			SortOrder: sorting.SortOrder,
+			Limit:     pg.Limit,
+			Offset:    pg.Offset,
+		})
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+
+		WriteJSON(w, http.StatusOK, PageResponse[service.LeaseResponse]{
+			Items:  leases,
+			Total:  total,
+			Limit:  pg.Limit,
+			Offset: pg.Offset,
+		})
 	}
 }
 

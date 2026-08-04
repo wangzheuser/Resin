@@ -586,6 +586,15 @@ func (r *Router) RangeLeases(platformID string, fn func(account string, lease Le
 	return true
 }
 
+// LeaseCount returns the current number of leases for a platform.
+func (r *Router) LeaseCount(platformID string) int {
+	state, ok := r.states.Load(platformID)
+	if !ok {
+		return 0
+	}
+	return state.Leases.Size()
+}
+
 // DeleteLease removes a single lease by platform and account.
 // Returns true if a lease was deleted. Emits a LeaseRemove event.
 func (r *Router) DeleteLease(platformID, account string) bool {

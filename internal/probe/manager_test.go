@@ -3,6 +3,7 @@ package probe
 import (
 	"errors"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,48 @@ import (
 	"github.com/Resinat/Resin/internal/testutil"
 	"github.com/Resinat/Resin/internal/topology"
 )
+
+func TestProbeFailureReporter_ConcurrentDrainAndReset(t *testing.T) {
+	reporter := &probeFailureReporter{}
+	hash := node.HashFromRawOptions([]byte(`{"type":"failure-reporter"}`))
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				reporter.Record(probeFailureEgressFetch, hash, errors.New("connection refused"))
+			}
+		}()
+	}
+	wg.Wait()
+
+	snapshot := reporter.Drain()
+	if got := snapshot.buckets[probeFailureEgressFetch].count; got != 10_000 {
+		t.Fatalf("egress fetch failures: got %d, want 10000", got)
+	}
+	if snapshot.buckets[probeFailureEgressFetch].sampleNode != hash.Hex() {
+		t.Fatalf("sample node: got %q, want %q", snapshot.buckets[probeFailureEgressFetch].sampleNode, hash.Hex())
+	}
+	if !reporter.Drain().Empty() {
+		t.Fatal("reporter should be empty after drain")
+	}
+}
+
+func TestProbeFailureReporter_BoundsAndSanitizesSample(t *testing.T) {
+	reporter := &probeFailureReporter{}
+	hash := node.HashFromRawOptions([]byte(`{"type":"failure-sample"}`))
+	reporter.Record(probeFailureLatency, hash, errors.New("  first\n\t"+strings.Repeat("界", 300)))
+
+	sample := reporter.Drain().buckets[probeFailureLatency].sampleError
+	if strings.ContainsAny(sample, "\n\t") {
+		t.Fatalf("sample contains control whitespace: %q", sample)
+	}
+	if got := len([]rune(sample)); got != maxProbeFailureSampleRunes {
+		t.Fatalf("sample rune length: got %d, want %d", got, maxProbeFailureSampleRunes)
+	}
+}
 
 // storeOutbound sets a non-nil outbound on the entry.
 func storeOutbound(entry *node.NodeEntry) {
@@ -106,6 +149,9 @@ func TestProbeEgress_Failure(t *testing.T) {
 
 	if entry.FailureCount.Load() != 1 {
 		t.Fatalf("expected 1 failure, got %d", entry.FailureCount.Load())
+	}
+	if got := mgr.failureReporter.Drain().buckets[probeFailureEgressFetch].count; got != 1 {
+		t.Fatalf("egress failure summary count: got %d, want 1", got)
 	}
 
 	// No latency or egress IP should be recorded.
@@ -207,6 +253,9 @@ func TestProbeLatency_Failure(t *testing.T) {
 
 	if entry.FailureCount.Load() != 1 {
 		t.Fatalf("expected 1 failure, got %d", entry.FailureCount.Load())
+	}
+	if got := mgr.failureReporter.Drain().buckets[probeFailureLatency].count; got != 1 {
+		t.Fatalf("latency failure summary count: got %d, want 1", got)
 	}
 }
 

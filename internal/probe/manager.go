@@ -68,6 +68,7 @@ type ProbeManager struct {
 	latencyTestURL                  func() string
 	latencyAuthorities              func() []string
 	onProbeEvent                    func(kind string)
+	failureReporter                 *probeFailureReporter
 }
 
 const (
@@ -75,6 +76,7 @@ const (
 	egressTraceDomain     = "cloudflare.com"
 	defaultLatencyTestURL = "https://www.gstatic.com/generate_204"
 	defaultQueueCap       = 1024
+	probeFailureInterval  = time.Minute
 )
 
 type probePriority uint8
@@ -270,6 +272,7 @@ func NewProbeManager(cfg ProbeConfig) *ProbeManager {
 		latencyTestURL:                  cfg.LatencyTestURL,
 		latencyAuthorities:              cfg.LatencyAuthorities,
 		onProbeEvent:                    cfg.OnProbeEvent,
+		failureReporter:                 &probeFailureReporter{},
 	}
 }
 
@@ -280,6 +283,12 @@ func (m *ProbeManager) SetOnProbeEvent(fn func(kind string)) {
 
 // Start launches the background probe workers.
 func (m *ProbeManager) Start() {
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.runFailureReporter()
+	}()
+
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
@@ -301,6 +310,47 @@ func (m *ProbeManager) Start() {
 	}
 }
 
+// runFailureReporter flushes accumulated probe failures on a fixed cadence.
+func (m *ProbeManager) runFailureReporter() {
+	ticker := time.NewTicker(probeFailureInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			m.flushFailureSummary()
+		}
+	}
+}
+
+// flushFailureSummary emits one bounded log record for the current window.
+func (m *ProbeManager) flushFailureSummary() {
+	snapshot := m.failureReporter.Drain()
+	if snapshot.Empty() {
+		return
+	}
+	egressFetch := snapshot.buckets[probeFailureEgressFetch]
+	egressParse := snapshot.buckets[probeFailureEgressParse]
+	latency := snapshot.buckets[probeFailureLatency]
+	log.Printf(
+		"[probe] failure summary interval=%s egress_fetch=%d egress_parse=%d latency=%d "+
+			"egress_fetch_sample_node=%s egress_fetch_sample=%q "+
+			"egress_parse_sample_node=%s egress_parse_sample=%q "+
+			"latency_sample_node=%s latency_sample=%q",
+		probeFailureInterval,
+		egressFetch.count,
+		egressParse.count,
+		latency.count,
+		egressFetch.sampleNode,
+		egressFetch.sampleError,
+		egressParse.sampleNode,
+		egressParse.sampleError,
+		latency.sampleNode,
+		latency.sampleError,
+	)
+}
+
 // Stop signals all probe workers to stop and waits for completion.
 //
 // Design note:
@@ -314,6 +364,7 @@ func (m *ProbeManager) Stop() {
 		m.taskQueue.StopDropPending()
 	})
 	m.wg.Wait()
+	m.flushFailureSummary()
 }
 
 // TriggerImmediateEgressProbe enqueues an async egress probe for a node.
@@ -751,10 +802,10 @@ func (m *ProbeManager) probeEgress(hash node.Hash, entry *node.NodeEntry) {
 	_, stage, err := m.performEgressProbe(hash)
 	if err != nil {
 		if stage == egressProbeParseError {
-			log.Printf("[probe] parse egress IP for %s: %v", hash.Hex(), err)
+			m.failureReporter.Record(probeFailureEgressParse, hash, err)
 			return
 		}
-		log.Printf("[probe] egress probe failed for %s: %v", hash.Hex(), err)
+		m.failureReporter.Record(probeFailureEgressFetch, hash, err)
 		return
 	}
 }
@@ -776,7 +827,7 @@ func (m *ProbeManager) probeLatency(hash node.Hash, entry *node.NodeEntry, testU
 	}
 
 	if err := m.performLatencyProbe(hash, testURL); err != nil {
-		log.Printf("[probe] latency probe failed for %s: %v", hash.Hex(), err)
+		m.failureReporter.Record(probeFailureLatency, hash, err)
 		return
 	}
 }

@@ -1,6 +1,8 @@
 package service
 
 import (
+	"cmp"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,6 +24,21 @@ type LeaseResponse struct {
 	EgressIP     string `json:"egress_ip"`
 	Expiry       string `json:"expiry"`
 	LastAccessed string `json:"last_accessed"`
+}
+
+// LeaseListOptions contains filters, sorting, and pagination for a lease list query.
+type LeaseListOptions struct {
+	Account   string
+	Fuzzy     bool
+	SortBy    string
+	SortOrder string
+	Limit     int
+	Offset    int
+}
+
+type leaseListCandidate struct {
+	account string
+	lease   routing.Lease
 }
 
 func leaseToResponse(lease model.Lease, nodeTag string) LeaseResponse {
@@ -51,27 +68,81 @@ func (s *ControlPlaneService) resolveLeaseNodeTagFromHex(hashHex string) string 
 	return s.resolveLeaseNodeTag(hash)
 }
 
-// ListLeases returns all leases for a platform.
-func (s *ControlPlaneService) ListLeases(platformID string) ([]LeaseResponse, error) {
+// ListLeasesPage returns one filtered and sorted page of leases for a platform.
+func (s *ControlPlaneService) ListLeasesPage(platformID string, options LeaseListOptions) ([]LeaseResponse, int, error) {
 	if _, ok := s.Pool.GetPlatform(platformID); !ok {
-		return nil, notFound("platform not found")
+		return nil, 0, notFound("platform not found")
 	}
-	var result []LeaseResponse
+
+	account := strings.TrimSpace(options.Account)
+	if account != "" && !options.Fuzzy {
+		lease := s.Router.ReadLease(model.LeaseKey{PlatformID: platformID, Account: account})
+		if lease == nil {
+			return []LeaseResponse{}, 0, nil
+		}
+		if options.Offset > 0 || options.Limit <= 0 {
+			return []LeaseResponse{}, 1, nil
+		}
+		return []LeaseResponse{
+			leaseToResponse(*lease, s.resolveLeaseNodeTagFromHex(lease.NodeHash)),
+		}, 1, nil
+	}
+
+	accountLower := strings.ToLower(account)
+	candidates := make([]leaseListCandidate, 0, s.Router.LeaseCount(platformID))
 	s.Router.RangeLeases(platformID, func(account string, lease routing.Lease) bool {
+		if accountLower != "" && !strings.Contains(strings.ToLower(account), accountLower) {
+			return true
+		}
+		candidates = append(candidates, leaseListCandidate{account: account, lease: lease})
+		return true
+	})
+
+	slices.SortFunc(candidates, func(a, b leaseListCandidate) int {
+		order := compareLeaseListCandidate(options.SortBy, a, b)
+		if order != 0 && options.SortOrder == "desc" {
+			order = -order
+		}
+		if order != 0 {
+			return order
+		}
+		return strings.Compare(a.account, b.account)
+	})
+
+	total := len(candidates)
+	if options.Offset >= total || options.Limit <= 0 {
+		return []LeaseResponse{}, total, nil
+	}
+	end := total
+	if options.Limit < total-options.Offset {
+		end = options.Offset + options.Limit
+	}
+
+	page := candidates[options.Offset:end]
+	result := make([]LeaseResponse, 0, len(page))
+	for _, candidate := range page {
+		lease := candidate.lease
 		result = append(result, leaseToResponse(model.Lease{
 			PlatformID:     platformID,
-			Account:        account,
+			Account:        candidate.account,
 			NodeHash:       lease.NodeHash.Hex(),
 			EgressIP:       lease.EgressIP.String(),
 			ExpiryNs:       lease.ExpiryNs,
 			LastAccessedNs: lease.LastAccessedNs,
 		}, s.resolveLeaseNodeTag(lease.NodeHash)))
-		return true
-	})
-	if result == nil {
-		result = []LeaseResponse{}
 	}
-	return result, nil
+	return result, total, nil
+}
+
+func compareLeaseListCandidate(sortBy string, a, b leaseListCandidate) int {
+	switch sortBy {
+	case "expiry":
+		return cmp.Compare(a.lease.ExpiryNs, b.lease.ExpiryNs)
+	case "last_accessed":
+		return cmp.Compare(a.lease.LastAccessedNs, b.lease.LastAccessedNs)
+	default:
+		return strings.Compare(a.account, b.account)
+	}
 }
 
 // GetLease returns a single lease.

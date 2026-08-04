@@ -3,13 +3,32 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"strings"
 	"syscall"
 	"testing"
+
+	ws "github.com/sagernet/ws"
 )
+
+func TestSummarizeUpstreamError_HTTPStatus(t *testing.T) {
+	for _, status := range []int{403, 404, 429, 500} {
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			err := fmt.Errorf("dial websocket: %w", ws.StatusError(status))
+			detail := summarizeUpstreamError(err)
+			if detail.Kind != "http_status_error" {
+				t.Fatalf("kind: got %q, want %q", detail.Kind, "http_status_error")
+			}
+			wantErrno := fmt.Sprintf("HTTP_%d", status)
+			if detail.Errno != wantErrno {
+				t.Fatalf("errno: got %q, want %q", detail.Errno, wantErrno)
+			}
+		})
+	}
+}
 
 func TestSummarizeUpstreamError_Canceled(t *testing.T) {
 	detail := summarizeUpstreamError(context.Canceled)

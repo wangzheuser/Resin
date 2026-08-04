@@ -5,8 +5,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/Resinat/Resin/internal/scanloop"
+	"github.com/puzpuzpuz/xsync/v4"
+)
+
+const (
+	defaultLeaseCleanupInterval = time.Minute
+	defaultLeaseCleanupJitter   = 15 * time.Second
 )
 
 // LeaseCleaner periodically sweeps for expired leases.
@@ -22,8 +27,9 @@ type LeaseCleaner struct {
 	sweepHook func()
 }
 
+// NewLeaseCleaner creates a cleaner with the production sweep cadence.
 func NewLeaseCleaner(router *Router) *LeaseCleaner {
-	return newLeaseCleanerWithIntervals(router, 13*time.Second, 4*time.Second)
+	return newLeaseCleanerWithIntervals(router, defaultLeaseCleanupInterval, defaultLeaseCleanupJitter)
 }
 
 func newLeaseCleanerWithIntervals(router *Router, minInterval, jitterRange time.Duration) *LeaseCleaner {
@@ -35,6 +41,7 @@ func newLeaseCleanerWithIntervals(router *Router, minInterval, jitterRange time.
 	}
 }
 
+// Start launches the background lease sweep.
 func (c *LeaseCleaner) Start() {
 	c.wg.Add(1)
 	go func() {
@@ -43,6 +50,7 @@ func (c *LeaseCleaner) Start() {
 	}()
 }
 
+// Stop waits for the current sweep and stops the cleaner.
 func (c *LeaseCleaner) Stop() {
 	c.stopOnce.Do(func() { close(c.stopCh) })
 	c.wg.Wait()

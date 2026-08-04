@@ -13,6 +13,7 @@ require (
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/sagernet/sing v0.7.18
 	github.com/sagernet/sing-box v1.12.21
+	github.com/sagernet/ws v0.0.0-20231204124109-acfe8907c854
 	github.com/zeebo/xxh3 v1.0.2
 	golang.org/x/net v0.50.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -153,7 +154,6 @@ require (
 	github.com/sagernet/smux v1.5.50-sing-box-mod.1 // indirect
 	github.com/sagernet/tailscale v1.80.3-sing-box-1.12-mod.2 // indirect
 	github.com/sagernet/wireguard-go v0.0.1-beta.7 // indirect
-	github.com/sagernet/ws v0.0.0-20231204124109-acfe8907c854 // indirect
 	github.com/samber/lo v1.53.0 // indirect
 	github.com/sina-ghaderi/poly1305 v0.0.0-20220724002748-c5926b03988b // indirect
 	github.com/sina-ghaderi/rabaead v0.0.0-20220730151906-ab6e06b96e8c // indirect
