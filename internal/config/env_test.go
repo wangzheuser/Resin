@@ -78,7 +78,7 @@ func TestLoadEnvConfig_Defaults(t *testing.T) {
 	// Request log
 	assertEqual(t, "RequestLogQueueSize", cfg.RequestLogQueueSize, 8192)
 	assertEqual(t, "RequestLogQueueFlushBatchSize", cfg.RequestLogQueueFlushBatchSize, 4096)
-	assertEqual(t, "RequestLogDBMaxMB", cfg.RequestLogDBMaxMB, 512)
+	assertEqual(t, "RequestLogDBMaxMB", cfg.RequestLogDBMaxMB, 128)
 	assertEqual(t, "RequestLogDBRetainCount", cfg.RequestLogDBRetainCount, 5)
 
 	// Auth

@@ -457,6 +457,36 @@ func TestRepo_MaybeRotateCountsWalAndShmSize(t *testing.T) {
 	}
 }
 
+func TestRepo_InsertBatchRotatesImmediatelyAfterCrossingLimit(t *testing.T) {
+	repo := NewRepo(t.TempDir(), 1<<20, 5)
+	if err := repo.Open(); err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	initialSize, err := sqliteFilesSize(repo.activePath)
+	if err != nil {
+		t.Fatalf("sqliteFilesSize: %v", err)
+	}
+	repo.maxBytes = initialSize + 1
+	before := repo.activePath
+
+	inserted, err := repo.InsertBatch([]proxy.RequestLogEntry{{
+		ID:         "cross-limit",
+		ReqBody:    make([]byte, 64*1024),
+		ReqBodyLen: 64 * 1024,
+	}})
+	if err != nil {
+		t.Fatalf("repo.InsertBatch: %v", err)
+	}
+	if inserted != 1 {
+		t.Fatalf("inserted: got %d, want 1", inserted)
+	}
+	if repo.activePath == before {
+		t.Fatal("expected immediate rotation after the batch crossed the size limit")
+	}
+}
+
 func TestRepo_InsertBatchRecoversAfterActiveDBLost(t *testing.T) {
 	repo := NewRepo(t.TempDir(), 1<<20, 5)
 	if err := repo.Open(); err != nil {

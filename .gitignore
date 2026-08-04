@@ -1,4 +1,6 @@
 /resin
+/resin.exe
+/resin.exe~
 sing-box-reference
 .agents
 .devcontainer
@@ -12,4 +14,7 @@ start-instance.sh
 .omc/
 .local/
 .setting/
+.rollout/
+.spec-workflow/
+data/
 AGENTS.md

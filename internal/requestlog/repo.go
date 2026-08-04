@@ -41,7 +41,7 @@ type Repo struct {
 // how many historical DB files are kept.
 func NewRepo(logDir string, maxBytes int64, retainCount int) *Repo {
 	if maxBytes <= 0 {
-		maxBytes = 512 * 1024 * 1024 // 512 MB default
+		maxBytes = 128 * 1024 * 1024 // 128 MB default
 	}
 	if retainCount <= 0 {
 		retainCount = 5
@@ -176,6 +176,11 @@ func (r *Repo) InsertBatch(entries []proxy.RequestLogEntry) (int, error) {
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("requestlog repo commit: %w", err)
+	}
+	// Rotate immediately after a batch crosses the threshold so the next batch
+	// cannot keep growing an already-full database.
+	if err := r.maybeRotate(); err != nil {
+		log.Printf("[requestlog] warning: post-insert rotation failed: %v", err)
 	}
 	return inserted, nil
 }
