@@ -1,5 +1,16 @@
 # Resin 启动脚本 (Windows PowerShell)
-# 自动检测环境、安装依赖、构建并启动服务
+# 按需构建并启动服务,默认直接使用现有 resin.exe
+#
+# 用法:
+#   .\start.ps1                  交互式选择构建方式 (默认直接启动,不重新构建)
+#   .\start.ps1 -Build none      跳过构建,直接使用现有 resin.exe
+#   .\start.ps1 -Build backend   仅重新构建后端 (Go)
+#   .\start.ps1 -Build all       全量重新构建 (前端 + 后端)
+
+param(
+    [ValidateSet("auto", "none", "backend", "all")]
+    [string]$Build = "auto"
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -282,6 +293,57 @@ function Build-Backend {
     Write-Ok "后端构建完成: $ProjectRoot\resin.exe"
 }
 
+# ==================== 构建选择 ====================
+
+function Get-BuildMode {
+    # 参数显式指定时跳过交互,便于自动化场景
+    if ($Build -ne "auto") {
+        Write-Info "构建模式 (由参数指定): $Build"
+        return $Build
+    }
+
+    Write-Host "请选择启动方式:"
+    Write-Host "  [1] 直接启动,使用现有 resin.exe (默认,直接回车)"
+    Write-Host "  [2] 仅重新构建后端 (Go, 通常只需几秒)"
+    Write-Host "  [3] 全量重新构建 (前端 + 后端, 约 30 秒以上)"
+
+    while ($true) {
+        $choice = (Read-Host "请输入选择 (1/2/3, 回车=1)").Trim()
+        switch ($choice) {
+            ""      { return "none" }
+            "1"     { return "none" }
+            "2"     { return "backend" }
+            "3"     { return "all" }
+            default { Write-Warn "无效输入: '$choice', 请输入 1、2 或 3" }
+        }
+    }
+}
+
+function Warn-StaleBinary {
+    # 直接启动时提示源码可能比二进制新,由用户自行决定是否重建
+    $exe = "$ProjectRoot\resin.exe"
+    if (-not (Test-Path $exe)) {
+        return
+    }
+
+    $exeTime = (Get-Item $exe).LastWriteTime
+    $scanPaths = @(
+        "$ProjectRoot\cmd",
+        "$ProjectRoot\internal",
+        "$ProjectRoot\webui\src",
+        "$ProjectRoot\webui\dist",
+        "$ProjectRoot\go.mod"
+    )
+    $newest = Get-ChildItem -Path $scanPaths -Recurse -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+
+    if ($null -ne $newest -and $newest.LastWriteTime -gt $exeTime) {
+        $relPath = $newest.FullName.Substring($ProjectRoot.Length)
+        Write-Warn "检测到 $relPath 比 resin.exe 更新, 直接启动将运行旧版本"
+    }
+}
+
 # ==================== 启动 ====================
 
 function New-DataDirs {
@@ -323,24 +385,55 @@ function Main {
     Write-Host "=========================================="
     Write-Host ""
 
-    # 1. 检测环境
-    $arch = Detect-Arch
-    Write-Ok "架构: $arch"
-    Check-Go
-    Check-Node
+    # 1. 选择构建方式 (默认直接启动, 不重新构建)
+    $buildMode = Get-BuildMode
 
-    # 2. 加载环境变量
+    # 2. 必要性降级: 缺少可直接运行的产物时自动补建
+    if ($buildMode -eq "none") {
+        if (-not (Test-Path "$ProjectRoot\resin.exe")) {
+            Write-Warn "未找到 resin.exe, 无法直接启动, 将构建后端"
+            $buildMode = "backend"
+        }
+    }
+    if ($buildMode -eq "backend") {
+        # go:embed 需要 webui/dist 存在
+        if (-not (Test-Path "$ProjectRoot\webui\dist\index.html")) {
+            Write-Warn "未找到前端构建产物 webui\dist, 将同时构建前端"
+            $buildMode = "all"
+        }
+    }
+
+    # 3. 环境检测 (仅在需要构建时)
+    if ($buildMode -ne "none") {
+        $arch = Detect-Arch
+        Write-Ok "架构: $arch"
+        Check-Go
+        if ($buildMode -eq "all") {
+            Check-Node
+        }
+    }
+
+    # 4. 加载环境变量
     Load-Env
 
-    # 3. 设置构建代理
-    Setup-Proxy
-
-    # 4. 构建
-    Build-Frontend
-    Build-Backend
-
-    # 5. 清除构建代理
-    Cleanup-Proxy
+    # 5. 按需构建
+    switch ($buildMode) {
+        "all" {
+            Setup-Proxy
+            Build-Frontend
+            Build-Backend
+            Cleanup-Proxy
+        }
+        "backend" {
+            Setup-Proxy
+            Build-Backend
+            Cleanup-Proxy
+        }
+        "none" {
+            Warn-StaleBinary
+            Write-Ok "跳过构建, 直接启动现有 resin.exe"
+        }
+    }
 
     # 6. 创建数据目录
     New-DataDirs
