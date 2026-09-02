@@ -31,6 +31,27 @@ func randomRoute(
 	authorities []string,
 	p2cWindow time.Duration,
 ) (node.Hash, error) {
+	return randomRouteFiltered(
+		plat,
+		stats,
+		pool,
+		targetDomain,
+		authorities,
+		p2cWindow,
+		nil,
+	)
+}
+
+// randomRouteFiltered uses the existing P2C score after applying a rare-path eligibility filter.
+func randomRouteFiltered(
+	plat *platform.Platform,
+	stats *IPLoadStats,
+	pool PoolAccessor,
+	targetDomain string,
+	authorities []string,
+	p2cWindow time.Duration,
+	eligible func(node.Hash, *node.NodeEntry) bool,
+) (node.Hash, error) {
 	view := plat.View()
 	size := view.Size()
 	if size == 0 {
@@ -39,6 +60,32 @@ func randomRoute(
 
 	rng := randomRouteRNGPool.Get().(*rand.Rand)
 	defer randomRouteRNGPool.Put(rng)
+	if eligible != nil {
+		candidates := make([]node.Hash, 0, size)
+		view.Range(func(h node.Hash) bool {
+			entry, ok := pool.GetEntry(h)
+			if ok && eligible(h, entry) {
+				candidates = append(candidates, h)
+			}
+			return true
+		})
+		if len(candidates) == 0 {
+			return node.Zero, ErrNoAvailableNodes
+		}
+		if len(candidates) == 1 {
+			return candidates[0], nil
+		}
+		h1 := candidates[rng.IntN(len(candidates))]
+		h2 := h1
+		for h2 == h1 {
+			h2 = candidates[rng.IntN(len(candidates))]
+		}
+		lat1, lat2 := compareLatencies(h1, h2, pool, targetDomain, authorities, p2cWindow)
+		if calculateScore(h1, lat1, plat, stats, pool) < calculateScore(h2, lat2, plat, stats, pool) {
+			return h1, nil
+		}
+		return h2, nil
+	}
 
 	pick := func() (node.Hash, bool) {
 		return view.RandomPick(rng)

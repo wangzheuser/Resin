@@ -378,6 +378,17 @@ func (p *ForwardProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		lifecycle.setHTTPStatus(proxyErr.HTTPCode)
 		if hasRoute {
 			recordPassiveResultAsync(p.health, route, false)
+			detail := summarizeUpstreamError(err)
+			if shouldRecordTargetEgressFailure(detail) {
+				opened := p.router.RecordTargetEgressFailure(
+					route,
+					r.Host,
+					detail.Kind,
+				)
+				if opened && account != "" {
+					p.router.DeleteLeaseIfMatch(route.PlatformID, account, route.NodeHash, route.EgressIP)
+				}
+			}
 		}
 		writeProxyError(w, proxyErr)
 		return
@@ -399,6 +410,17 @@ func (p *ForwardProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			lifecycle.setNetOK(false)
 			if hasRoute {
 				recordPassiveResultAsync(p.health, route, false)
+				if copiedBytes == 0 {
+					detail := summarizeUpstreamError(copyErr)
+					opened := p.router.RecordTargetEgressFailure(
+						route,
+						r.Host,
+						detail.Kind,
+					)
+					if opened && account != "" {
+						p.router.DeleteLeaseIfMatch(route.PlatformID, account, route.NodeHash, route.EgressIP)
+					}
+				}
 			}
 		}
 		return
@@ -407,6 +429,7 @@ func (p *ForwardProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Full body transfer succeeded — count as network success even for 5xx HTTP.
 	if hasRoute {
 		recordPassiveResultAsync(p.health, route, true)
+		p.router.RecordTargetEgressSuccess(route, r.Host)
 	}
 }
 
@@ -460,7 +483,6 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)
 		lifecycle.setUpstreamError("connect_hijack", errors.New("response writer does not support hijacking"))
 		lifecycle.setHTTPStatus(ErrUpstreamRequestFailed.HTTPCode)
-		prepare.session.recordResult(false)
 		writeProxyError(w, ErrUpstreamRequestFailed)
 		return
 	}
@@ -470,7 +492,6 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 		prepare.session.upstreamConn.Close()
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)
 		lifecycle.setUpstreamError("connect_hijack", err)
-		prepare.session.recordResult(false)
 		return
 	}
 
@@ -502,7 +523,8 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 		lifecycle.setUpstreamError(relay.upstreamStage, relay.upstreamErr)
 	}
 	lifecycle.setNetOK(relay.netOK)
-	prepare.session.recordResult(relay.netOK)
+	failureKind := summarizeUpstreamError(relay.upstreamErr).Kind
+	prepare.session.recordResult(relay.netOK, failureKind, !relay.netOK && relay.ingressBytes == 0)
 }
 
 // shouldRecordForwardCopyFailure decides whether an HTTP response body copy

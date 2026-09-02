@@ -4,8 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
+	"log"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -25,7 +29,7 @@ type tunnelDeps struct {
 
 type preparedTunnel struct {
 	upstreamConn net.Conn
-	recordResult func(bool)
+	recordResult func(bool, string, bool)
 }
 
 type tunnelPrepareResult struct {
@@ -61,62 +65,134 @@ func prepareConnectTunnel(
 		return prepareDirectConnectTunnel(ctx, deps, target)
 	}
 
-	routed, routeErr := resolveRoutedOutbound(deps.router, deps.pool, platformName, account, target)
-	if routeErr != nil {
-		return tunnelPrepareResult{proxyErr: routeErr}
-	}
+	excludedEgressIPs := make(map[netip.Addr]struct{}, 1)
+	var initialRoute routing.RouteResult
+	var initialProxyErr *ProxyError
+	var initialUpstreamErr error
+	var routed routedOutbound
+	for attempt := 0; attempt < 2; attempt++ {
+		var routeErr *ProxyError
+		if attempt == 0 {
+			routed, routeErr = resolveRoutedOutbound(deps.router, deps.pool, platformName, account, target)
+		} else {
+			routed, routeErr = resolveRoutedOutboundExcluding(
+				deps.router,
+				deps.pool,
+				platformName,
+				account,
+				target,
+				excludedEgressIPs,
+			)
+		}
+		if routeErr != nil {
+			if attempt > 0 {
+				failed := false
+				deps.router.RecordRouteFailover(&failed)
+				logRouteFailover("failed", initialRoute, routing.RouteResult{}, target, "route_unavailable")
+				return tunnelPrepareResult{
+					route:         initialRoute,
+					proxyErr:      initialProxyErr,
+					upstreamStage: "connect_dial",
+					upstreamErr:   initialUpstreamErr,
+				}
+			}
+			return tunnelPrepareResult{route: initialRoute, proxyErr: routeErr}
+		}
+		if attempt == 0 {
+			initialRoute = routed.Route
+		}
 
-	domain := netutil.ExtractDomain(target)
-	nodeHashRaw := routed.Route.NodeHash
-	if deps.health != nil {
-		go deps.health.RecordLatency(nodeHashRaw, domain, nil)
-	}
-
-	rawConn, err := routed.Outbound.DialContext(ctx, "tcp", M.ParseSocksaddr(target))
-	if err != nil {
-		proxyErr := classifyConnectError(err)
-		if proxyErr == nil {
+		domain := netutil.ExtractDomain(target)
+		if deps.health != nil {
+			go deps.health.RecordLatency(routed.Route.NodeHash, domain, nil)
+		}
+		rawConn, err := routed.Outbound.DialContext(ctx, "tcp", M.ParseSocksaddr(target))
+		if err != nil {
+			proxyErr := classifyConnectError(err)
+			if proxyErr == nil {
+				return tunnelPrepareResult{route: routed.Route, canceled: true}
+			}
+			detail := summarizeUpstreamError(err)
+			recordPassiveResultAsync(deps.health, routed.Route, false)
+			if shouldRecordTargetEgressFailure(detail) {
+				deps.router.RecordTargetEgressFailure(routed.Route, target, detail.Kind)
+			}
+			if account != "" {
+				deps.router.DeleteLeaseIfMatch(
+					routed.Route.PlatformID,
+					account,
+					routed.Route.NodeHash,
+					routed.Route.EgressIP,
+				)
+			}
+			if attempt == 0 {
+				initialProxyErr = proxyErr
+				initialUpstreamErr = err
+				excludedEgressIPs[routed.Route.EgressIP] = struct{}{}
+				deps.router.RecordRouteFailover(nil)
+				logRouteFailover("retry", initialRoute, routing.RouteResult{}, target, detail.Kind)
+				continue
+			}
+			failed := false
+			deps.router.RecordRouteFailover(&failed)
+			logRouteFailover("failed", initialRoute, routed.Route, target, detail.Kind)
 			return tunnelPrepareResult{
-				route:    routed.Route,
-				canceled: true,
+				route:         routed.Route,
+				proxyErr:      proxyErr,
+				upstreamStage: "connect_dial",
+				upstreamErr:   err,
 			}
 		}
-		if deps.health != nil {
-			recordPassiveResultAsync(deps.health, routed.Route, false)
+		if attempt > 0 {
+			succeeded := true
+			deps.router.RecordRouteFailover(&succeeded)
+			logRouteFailover("success", initialRoute, routed.Route, target, "")
 		}
-		return tunnelPrepareResult{
-			route:         routed.Route,
-			proxyErr:      proxyErr,
-			upstreamStage: "connect_dial",
-			upstreamErr:   err,
-		}
-	}
 
-	recordResult := func(ok bool) {
-		if deps.health != nil {
+		recordResult := func(ok bool, failureKind string, targetFailure bool) {
 			recordPassiveResultAsync(deps.health, routed.Route, ok)
+			if ok {
+				deps.router.RecordTargetEgressSuccess(routed.Route, target)
+				return
+			}
+			if targetFailure && failureKind != "http_status_error" {
+				opened := deps.router.RecordTargetEgressFailure(
+					routed.Route,
+					target,
+					failureKind,
+				)
+				if opened && account != "" {
+					deps.router.DeleteLeaseIfMatch(
+						routed.Route.PlatformID,
+						account,
+						routed.Route.NodeHash,
+						routed.Route.EgressIP,
+					)
+				}
+			}
+		}
+
+		var upstreamBase net.Conn = rawConn
+		if deps.metricsSink != nil {
+			deps.metricsSink.OnConnectionLifecycle(ConnectionOutbound, ConnectionOpen)
+			upstreamBase = newCountingConn(rawConn, deps.metricsSink)
+		}
+
+		upstreamConn := newTLSLatencyConn(upstreamBase, func(latency time.Duration) {
+			if deps.health != nil {
+				deps.health.RecordLatency(routed.Route.NodeHash, domain, &latency)
+			}
+		})
+
+		return tunnelPrepareResult{
+			route: routed.Route,
+			session: &preparedTunnel{
+				upstreamConn: upstreamConn,
+				recordResult: recordResult,
+			},
 		}
 	}
-
-	var upstreamBase net.Conn = rawConn
-	if deps.metricsSink != nil {
-		deps.metricsSink.OnConnectionLifecycle(ConnectionOutbound, ConnectionOpen)
-		upstreamBase = newCountingConn(rawConn, deps.metricsSink)
-	}
-
-	upstreamConn := newTLSLatencyConn(upstreamBase, func(latency time.Duration) {
-		if deps.health != nil {
-			deps.health.RecordLatency(nodeHashRaw, domain, &latency)
-		}
-	})
-
-	return tunnelPrepareResult{
-		route: routed.Route,
-		session: &preparedTunnel{
-			upstreamConn: upstreamConn,
-			recordResult: recordResult,
-		},
-	}
+	return tunnelPrepareResult{route: initialRoute, proxyErr: ErrNoAvailableNodes}
 }
 
 func prepareDirectConnectTunnel(ctx context.Context, deps tunnelDeps, target string) tunnelPrepareResult {
@@ -142,9 +218,30 @@ func prepareDirectConnectTunnel(ctx context.Context, deps tunnelDeps, target str
 	return tunnelPrepareResult{
 		session: &preparedTunnel{
 			upstreamConn: upstreamConn,
-			recordResult: func(bool) {},
+			recordResult: func(bool, string, bool) {},
 		},
 	}
+}
+
+func logRouteFailover(action string, initial, final routing.RouteResult, target, failureKind string) {
+	log.Printf(
+		"route_failover action=%s initial_node_hash=%s initial_egress_hash=%s final_node_hash=%s final_egress_hash=%s target_domain=%s failure_kind=%s",
+		action,
+		initial.NodeHash.Hex(),
+		hashRouteEgress(initial.EgressIP),
+		final.NodeHash.Hex(),
+		hashRouteEgress(final.EgressIP),
+		netutil.ExtractDomain(target),
+		failureKind,
+	)
+}
+
+func hashRouteEgress(ip netip.Addr) string {
+	if !ip.IsValid() {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(ip.String()))
+	return hex.EncodeToString(sum[:6])
 }
 
 func pumpPreparedTunnel(

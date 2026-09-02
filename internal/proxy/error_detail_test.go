@@ -30,6 +30,18 @@ func TestSummarizeUpstreamError_HTTPStatus(t *testing.T) {
 	}
 }
 
+func TestShouldRecordTargetEgressFailure(t *testing.T) {
+	if shouldRecordTargetEgressFailure(summarizeUpstreamError(ws.StatusError(503))) {
+		t.Fatal("HTTP status response must not open a target-egress circuit")
+	}
+	if shouldRecordTargetEgressFailure(summarizeUpstreamError(context.Canceled)) {
+		t.Fatal("client cancellation must not open a target-egress circuit")
+	}
+	if !shouldRecordTargetEgressFailure(summarizeUpstreamError(io.ErrUnexpectedEOF)) {
+		t.Fatal("unexpected EOF should open a target-egress circuit")
+	}
+}
+
 func TestSummarizeUpstreamError_Canceled(t *testing.T) {
 	detail := summarizeUpstreamError(context.Canceled)
 	if detail.Kind != "canceled" {

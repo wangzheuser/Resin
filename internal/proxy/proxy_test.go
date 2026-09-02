@@ -50,12 +50,13 @@ type mockHealthRecorder struct {
 }
 
 func (m *mockHealthRecorder) RecordResult(hash node.Hash, success bool) {
-	m.resultCalls.Add(1)
 	if success {
 		m.lastSuccess.Store(1)
 	} else {
 		m.lastSuccess.Store(0)
 	}
+	// Publish the call count after the payload so polling tests observe one snapshot.
+	m.resultCalls.Add(1)
 }
 
 func (m *mockHealthRecorder) RecordLatency(hash node.Hash, rawTarget string, latency *time.Duration) {

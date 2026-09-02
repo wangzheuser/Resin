@@ -30,6 +30,7 @@ type PoolAccessor interface {
 type Router struct {
 	pool            PoolAccessor
 	states          *xsync.Map[string, *PlatformRoutingState]
+	targetEgress    *targetEgressCircuitTracker
 	authorities     func() []string
 	p2cWindow       func() time.Duration
 	onLeaseEvent    LeaseEventFunc
@@ -51,6 +52,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	return &Router{
 		pool:            cfg.Pool,
 		states:          xsync.NewMap[string, *PlatformRoutingState](),
+		targetEgress:    newTargetEgressCircuitTracker(time.Now, targetEgressMaxEntries),
 		authorities:     cfg.Authorities,
 		p2cWindow:       cfg.P2CWindow,
 		onLeaseEvent:    cfg.OnLeaseEvent,
@@ -78,6 +80,21 @@ const (
 )
 
 func (r *Router) RouteRequest(platName, account, target string) (RouteResult, error) {
+	return r.routeRequest(platName, account, target, nil)
+}
+
+// RouteRequestExcluding selects a route while excluding egress IPs already failed by this request.
+func (r *Router) RouteRequestExcluding(
+	platName, account, target string,
+	excludedEgressIPs map[netip.Addr]struct{},
+) (RouteResult, error) {
+	return r.routeRequest(platName, account, target, excludedEgressIPs)
+}
+
+func (r *Router) routeRequest(
+	platName, account, target string,
+	excludedEgressIPs map[netip.Addr]struct{},
+) (RouteResult, error) {
 	plat, err := r.resolvePlatform(platName)
 	if err != nil {
 		return RouteResult{}, err
@@ -85,14 +102,33 @@ func (r *Router) RouteRequest(platName, account, target string) (RouteResult, er
 
 	targetDomain := netutil.ExtractDomain(target)
 	state := r.ensurePlatformState(plat.ID)
+	effectiveExcluded := excludedEgressIPs
+	failedEgress, hasFailedEgress := r.targetEgress.failedLeaseEgress(plat.ID, account)
+	if hasFailedEgress {
+		effectiveExcluded = make(map[netip.Addr]struct{}, len(excludedEgressIPs)+1)
+		for ip := range excludedEgressIPs {
+			effectiveExcluded[ip] = struct{}{}
+		}
+		effectiveExcluded[failedEgress] = struct{}{}
+	}
 	var result RouteResult
 	if account == "" {
-		result, err = r.routeRandom(plat, state, targetDomain)
+		result, err = r.routeRandom(plat, state, targetDomain, effectiveExcluded)
 	} else {
-		result, err = r.routeSticky(plat, state, account, targetDomain, time.Now())
+		result, err = r.routeSticky(
+			plat,
+			state,
+			account,
+			targetDomain,
+			time.Now(),
+			effectiveExcluded,
+		)
 	}
 	if err != nil {
 		return RouteResult{}, err
+	}
+	if hasFailedEgress && result.EgressIP != failedEgress {
+		r.targetEgress.clearFailedLeaseEgress(plat.ID, account)
 	}
 	result = withPlatformContext(plat, result)
 	if r.nodeTagResolver != nil {
@@ -132,8 +168,14 @@ func (r *Router) routeRandom(
 	plat *platform.Platform,
 	state *PlatformRoutingState,
 	targetDomain string,
+	excludedEgressIPs map[netip.Addr]struct{},
 ) (RouteResult, error) {
-	h, entry, err := r.selectLiveRandomRoute(plat, state.IPLoadStats, targetDomain)
+	h, entry, err := r.selectLiveRandomRoute(
+		plat,
+		state.IPLoadStats,
+		targetDomain,
+		excludedEgressIPs,
+	)
 	if err != nil {
 		return RouteResult{}, err
 	}
@@ -150,6 +192,7 @@ func (r *Router) routeSticky(
 	account string,
 	targetDomain string,
 	now time.Time,
+	excludedEgressIPs map[netip.Addr]struct{},
 ) (RouteResult, error) {
 	nowNs := now.UnixNano()
 	var result RouteResult
@@ -165,6 +208,7 @@ func (r *Router) routeSticky(
 			nowNs,
 			current,
 			loaded,
+			excludedEgressIPs,
 		)
 		if err != nil {
 			routeErr = err
@@ -186,6 +230,7 @@ func (r *Router) decideStickyLease(
 	nowNs int64,
 	current Lease,
 	loaded bool,
+	excludedEgressIPs map[netip.Addr]struct{},
 ) (Lease, xsync.ComputeOp, RouteResult, error) {
 	hadPreviousLease := loaded
 	invalidation := leaseInvalidationNone
@@ -196,11 +241,21 @@ func (r *Router) decideStickyLease(
 	}
 
 	if loaded {
-		if newLease, hitResult, ok := r.tryLeaseHit(plat, account, current, nowNs); ok {
+		if newLease, hitResult, ok := r.tryLeaseHit(
+			plat,
+			account,
+			current,
+			targetDomain,
+			nowNs,
+			excludedEgressIPs,
+		); ok {
 			return newLease, xsync.UpdateOp, hitResult, nil
 		}
-		if newLease, rotatedResult, ok := r.tryLeaseSameIPRotation(plat, account, current, targetDomain, nowNs); ok {
-			return newLease, xsync.UpdateOp, rotatedResult, nil
+		_, explicitlyExcluded := excludedEgressIPs[current.EgressIP]
+		if !explicitlyExcluded && !r.targetEgress.isOpen(plat.ID, current.EgressIP, targetDomain) {
+			if newLease, rotatedResult, ok := r.tryLeaseSameIPRotation(plat, account, current, targetDomain, nowNs); ok {
+				return newLease, xsync.UpdateOp, rotatedResult, nil
+			}
 		}
 		invalidation = leaseInvalidationRemove
 	}
@@ -215,6 +270,7 @@ func (r *Router) decideStickyLease(
 		current,
 		hadPreviousLease,
 		invalidation,
+		excludedEgressIPs,
 	)
 }
 
@@ -228,8 +284,16 @@ func (r *Router) createOrAbortStickyLease(
 	previous Lease,
 	hadPreviousLease bool,
 	invalidation leaseInvalidationReason,
+	excludedEgressIPs map[netip.Addr]struct{},
 ) (Lease, xsync.ComputeOp, RouteResult, error) {
-	newLease, createdResult, err := r.createLease(plat, state, targetDomain, now, nowNs)
+	newLease, createdResult, err := r.createLease(
+		plat,
+		state,
+		targetDomain,
+		now,
+		nowNs,
+		excludedEgressIPs,
+	)
 	if err != nil {
 		r.cleanupPreviousLease(state, previous, hadPreviousLease, invalidation, plat.ID, account)
 		lease, op := abortLeaseCreate(previous, hadPreviousLease)
@@ -252,8 +316,16 @@ func (r *Router) tryLeaseHit(
 	plat *platform.Platform,
 	account string,
 	current Lease,
+	targetDomain string,
 	nowNs int64,
+	excludedEgressIPs map[netip.Addr]struct{},
 ) (Lease, RouteResult, bool) {
+	if _, excluded := excludedEgressIPs[current.EgressIP]; excluded {
+		return Lease{}, RouteResult{}, false
+	}
+	if r.targetEgress.isOpen(plat.ID, current.EgressIP, targetDomain) {
+		return Lease{}, RouteResult{}, false
+	}
 	entry, ok := r.pool.GetEntry(current.NodeHash)
 	if !ok || !plat.View().Contains(current.NodeHash) || entry.GetEgressIP() != current.EgressIP {
 		return Lease{}, RouteResult{}, false
@@ -317,8 +389,14 @@ func (r *Router) createLease(
 	targetDomain string,
 	now time.Time,
 	nowNs int64,
+	excludedEgressIPs map[netip.Addr]struct{},
 ) (Lease, RouteResult, error) {
-	h, entry, err := r.selectLiveRandomRoute(plat, state.IPLoadStats, targetDomain)
+	h, entry, err := r.selectLiveRandomRoute(
+		plat,
+		state.IPLoadStats,
+		targetDomain,
+		excludedEgressIPs,
+	)
 	if err != nil {
 		return Lease{}, RouteResult{}, err
 	}
@@ -392,10 +470,30 @@ func (r *Router) selectLiveRandomRoute(
 	plat *platform.Platform,
 	stats *IPLoadStats,
 	targetDomain string,
+	excludedEgressIPs map[netip.Addr]struct{},
 ) (node.Hash, *node.NodeEntry, error) {
 	var lastMissing node.Hash
 	for i := 0; i < livePickAttempts; i++ {
-		h, err := randomRoute(plat, stats, r.pool, targetDomain, r.authorities(), r.p2cWindow())
+		filterNeeded := len(excludedEgressIPs) > 0 || r.targetEgress.hasOpen(plat.ID, targetDomain)
+		var eligible func(node.Hash, *node.NodeEntry) bool
+		if filterNeeded {
+			eligible = func(_ node.Hash, entry *node.NodeEntry) bool {
+				ip := entry.GetEgressIP()
+				if _, excluded := excludedEgressIPs[ip]; excluded {
+					return false
+				}
+				return !r.targetEgress.isOpen(plat.ID, ip, targetDomain)
+			}
+		}
+		h, err := randomRouteFiltered(
+			plat,
+			stats,
+			r.pool,
+			targetDomain,
+			r.authorities(),
+			r.p2cWindow(),
+			eligible,
+		)
 		if err != nil {
 			return node.Zero, nil, err
 		}
@@ -615,6 +713,73 @@ func (r *Router) DeleteLease(platformID, account string) bool {
 		CreatedAtNs: lease.CreatedAtNs,
 	})
 	return true
+}
+
+// DeleteLeaseIfMatch removes a stale sticky lease only when node and egress still match.
+func (r *Router) DeleteLeaseIfMatch(
+	platformID, account string,
+	nodeHash node.Hash,
+	egressIP netip.Addr,
+) bool {
+	state, ok := r.states.Load(platformID)
+	if !ok {
+		return false
+	}
+	var removed Lease
+	deleted := false
+	_, _ = state.Leases.leases.Compute(account, func(current Lease, loaded bool) (Lease, xsync.ComputeOp) {
+		if !loaded || current.NodeHash != nodeHash || current.EgressIP != egressIP {
+			return current, xsync.CancelOp
+		}
+		state.Leases.stats.Dec(current.EgressIP)
+		removed = current
+		deleted = true
+		return current, xsync.DeleteOp
+	})
+	if deleted {
+		r.targetEgress.markFailedLeaseEgress(platformID, account, removed.EgressIP)
+		r.emitLeaseEvent(LeaseEvent{
+			Type:        LeaseRemove,
+			PlatformID:  platformID,
+			Account:     account,
+			NodeHash:    removed.NodeHash,
+			EgressIP:    removed.EgressIP,
+			CreatedAtNs: removed.CreatedAtNs,
+		})
+	}
+	return deleted
+}
+
+// RecordTargetEgressFailure records a target-specific network failure and reports a circuit opening.
+func (r *Router) RecordTargetEgressFailure(route RouteResult, target, failureKind string) bool {
+	if r == nil {
+		return false
+	}
+	return r.targetEgress.recordFailure(route.PlatformID, route.EgressIP, target, failureKind)
+}
+
+// RecordTargetEgressSuccess clears target-specific failures after a complete transfer.
+func (r *Router) RecordTargetEgressSuccess(route RouteResult, target string) {
+	if r == nil {
+		return
+	}
+	r.targetEgress.recordSuccess(route.PlatformID, route.EgressIP, target)
+}
+
+// RecordRouteFailover records a CONNECT pre-commit retry outcome.
+func (r *Router) RecordRouteFailover(success *bool) {
+	if r == nil {
+		return
+	}
+	r.targetEgress.recordFailover(success)
+}
+
+// TargetEgressStats returns current target circuit and cumulative failover counters.
+func (r *Router) TargetEgressStats() TargetEgressStats {
+	if r == nil {
+		return TargetEgressStats{}
+	}
+	return r.targetEgress.snapshot()
 }
 
 // DeleteAllLeases removes all leases for a platform.

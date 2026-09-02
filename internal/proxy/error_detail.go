@@ -41,6 +41,11 @@ func summarizeUpstreamError(err error) upstreamErrorDetail {
 	return detail
 }
 
+// shouldRecordTargetEgressFailure excludes client cancellation and HTTP status responses from target circuits.
+func shouldRecordTargetEgressFailure(detail upstreamErrorDetail) bool {
+	return detail.Kind != "" && detail.Kind != "canceled" && detail.Kind != "http_status_error"
+}
+
 func extractHTTPStatusCode(err error) (int, bool) {
 	if err == nil {
 		return 0, false

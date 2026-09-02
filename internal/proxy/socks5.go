@@ -164,7 +164,8 @@ func (s *Socks5Inbound) ServeConnContext(baseCtx context.Context, conn net.Conn)
 		lifecycle.setUpstreamError(relay.upstreamStage, relay.upstreamErr)
 	}
 	lifecycle.setNetOK(relay.netOK)
-	prepare.session.recordResult(relay.netOK)
+	failureKind := summarizeUpstreamError(relay.upstreamErr).Kind
+	prepare.session.recordResult(relay.netOK, failureKind, !relay.netOK && relay.ingressBytes == 0)
 }
 
 func (s *Socks5Inbound) performHandshake(conn net.Conn, reader *bufio.Reader) socks5HandshakeResult {

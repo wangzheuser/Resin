@@ -699,6 +699,15 @@ func (a *runtimeStatsAdapter) UniqueHealthyEgressIPCount() int {
 	return len(seen)
 }
 
+// TargetEgressCircuitStats returns process-local target circuit and failover counters.
+func (a *runtimeStatsAdapter) TargetEgressCircuitStats() (int, uint64, uint64, uint64) {
+	if a == nil || a.router == nil {
+		return 0, 0, 0, 0
+	}
+	stats := a.router.TargetEgressStats()
+	return stats.Open, stats.FailoverAttempts, stats.FailoverSuccesses, stats.FailoverFailures
+}
+
 func (a *runtimeStatsAdapter) LeaseCountsByPlatform() map[string]int {
 	result := make(map[string]int)
 	a.pool.RangePlatforms(func(plat *platform.Platform) bool {

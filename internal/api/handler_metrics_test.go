@@ -19,6 +19,10 @@ type testPlatformStats struct {
 	healthyNodes         int
 	egressIPCount        int
 	healthyEgressIPCount int
+	targetCircuitOpen    int
+	failoverAttempts     uint64
+	failoverSuccesses    uint64
+	failoverFailures     uint64
 }
 
 func (s testPlatformStats) TotalNodes() int    { return s.totalNodes }
@@ -29,6 +33,10 @@ func (s testPlatformStats) UniqueHealthyEgressIPCount() int {
 }
 
 func (s testPlatformStats) LeaseCountsByPlatform() map[string]int { return nil }
+
+func (s testPlatformStats) TargetEgressCircuitStats() (int, uint64, uint64, uint64) {
+	return s.targetCircuitOpen, s.failoverAttempts, s.failoverSuccesses, s.failoverFailures
+}
 
 func (s testPlatformStats) RoutableNodeCount(platformID string) (int, bool) {
 	_, ok := s.platforms[platformID]
@@ -377,6 +385,16 @@ func TestMetricsHandlers_SnapshotNodePool_IncludesHealthyEgressIPCount(t *testin
 	}
 	if body["healthy_egress_ip_count"] != float64(4) {
 		t.Fatalf("healthy_egress_ip_count: got %v, want 4", body["healthy_egress_ip_count"])
+	}
+	for _, key := range []string{
+		"target_egress_circuit_open",
+		"route_failover_attempts",
+		"route_failover_successes",
+		"route_failover_failures",
+	} {
+		if body[key] != float64(0) {
+			t.Fatalf("%s: got %v, want 0", key, body[key])
+		}
 	}
 }
 
