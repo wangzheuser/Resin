@@ -16,7 +16,9 @@ import (
 	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/Resinat/Resin/internal/outbound"
 	"github.com/Resinat/Resin/internal/routing"
+	"github.com/sagernet/sing/common"
 	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
 type tunnelDeps struct {
@@ -107,7 +109,15 @@ func prepareConnectTunnel(
 			go deps.health.RecordLatency(routed.Route.NodeHash, domain, nil)
 		}
 		rawConn, err := routed.Outbound.DialContext(ctx, "tcp", M.ParseSocksaddr(target))
+		if err == nil {
+			if earlyConn, ok := common.Cast[N.EarlyConn](rawConn); ok && earlyConn.NeedHandshake() {
+				_, err = rawConn.Write(nil)
+			}
+		}
 		if err != nil {
+			if rawConn != nil {
+				_ = rawConn.Close()
+			}
 			proxyErr := classifyConnectError(err)
 			if proxyErr == nil {
 				return tunnelPrepareResult{route: routed.Route, canceled: true}

@@ -1,7 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { AlertTriangle, ArrowRight, Eye, Filter, Info, Pencil, Plus, RefreshCw, Route, Search, Sparkles, Trash2, Upload, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Eye, Filter, Info, Pencil, Plus, Power, RefreshCw, Route, Search, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { Link } from "react-router-dom";
@@ -460,6 +460,30 @@ export function SubscriptionPage() {
     },
   });
 
+  const toggleEnabledMutation = useMutation({
+    mutationFn: async ({ subscription, enabled }: { subscription: Subscription; enabled: boolean }) =>
+      updateSubscription(subscription.id, { enabled }),
+    onSuccess: async (updated) => {
+      queryClient.setQueryData(["subscription", updated.id], updated);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["subscriptions"] }),
+        queryClient.invalidateQueries({ queryKey: ["nodes"] }),
+        queryClient.invalidateQueries({ queryKey: ["platforms"] }),
+      ]);
+      showToast(
+        "success",
+        updated.enabled
+          ? t("订阅 {{name}} 已启用", { name: updated.name })
+          : t("订阅 {{name}} 已禁用", { name: updated.name }),
+      );
+    },
+    onError: (error) => {
+      showToast("error", formatApiErrorMessage(error, t));
+    },
+  });
+  const toggleEnabledMutateAsync = toggleEnabledMutation.mutateAsync;
+  const isToggleEnabledPending = toggleEnabledMutation.isPending;
+
   const deleteMutation = useMutation({
     mutationFn: async (subscription: Subscription) => {
       await deleteSubscription(subscription.id);
@@ -564,6 +588,23 @@ export function SubscriptionPage() {
     }
     await deleteSubscriptionMutateAsync(subscription);
   }, [deleteSubscriptionMutateAsync, t]);
+
+  const handleToggleEnabled = useCallback(async (subscription: Subscription) => {
+    const enabled = !subscription.enabled;
+    const confirmed = window.confirm(
+      enabled
+        ? t("确认启用订阅 {{name}}？启用后相关节点将重新进入检查和路由流程。", { name: subscription.name })
+        : t("确认禁用订阅 {{name}}？禁用后相关节点将立即退出平台路由。", { name: subscription.name }),
+    );
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await toggleEnabledMutateAsync({ subscription, enabled });
+    } catch {
+      // Mutation callbacks already surface the failure to the user.
+    }
+  }, [t, toggleEnabledMutateAsync]);
 
   const handleCleanupCircuitOpenNodes = async (subscription: Subscription) => {
     const confirmed = window.confirm(t("确认立即清理订阅 {{name}} 中的熔断或异常节点？", { name: subscription.name }));
@@ -708,6 +749,16 @@ export function SubscriptionPage() {
               <Button
                 size="sm"
                 variant="ghost"
+                onClick={() => void handleToggleEnabled(s)}
+                disabled={isToggleEnabledPending}
+                title={s.enabled ? t("禁用订阅") : t("启用订阅")}
+                aria-label={s.enabled ? t("禁用订阅 {{name}}", { name: s.name }) : t("启用订阅 {{name}}", { name: s.name })}
+              >
+                <Power size={14} />
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
                 onClick={() => void handleDelete(s)}
                 disabled={isDeletePending}
                 title={t("删除")}
@@ -720,7 +771,7 @@ export function SubscriptionPage() {
         },
       }),
     ],
-    [col, handleDelete, handleRefresh, isDeletePending, isRefreshPending, openDrawer, relayPlatformByID, t]
+    [col, handleDelete, handleRefresh, handleToggleEnabled, isDeletePending, isRefreshPending, isToggleEnabledPending, openDrawer, relayPlatformByID, t]
   );
 
   return (

@@ -645,6 +645,8 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "订阅 {{name}} 没有可清理的熔断或异常节点":
     "Subscription {{name}} has no circuit-open or failed nodes to clean",
   "订阅 {{name}} 已更新": "Subscription {{name}} updated",
+  "订阅 {{name}} 已启用": "Subscription {{name}} enabled",
+  "订阅 {{name}} 已禁用": "Subscription {{name}} disabled",
   "订阅 {{name}} 已清理 {{count}} 个节点": "Subscription {{name}} cleaned {{count}} nodes",
   "订阅 {{name}} 已删除": "Subscription {{name}} deleted",
   "订阅 {{name}} 已手动刷新": "Subscription {{name}} refreshed manually",
@@ -673,6 +675,14 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "请求日志详情 {{id}}": "Request log details {{id}}",
   "确认立即清理订阅 {{name}} 中的熔断或异常节点？":
     "Clean circuit-open or failed nodes in subscription {{name}} now?",
+  "确认启用订阅 {{name}}？启用后相关节点将重新进入检查和路由流程。":
+    "Enable subscription {{name}}? Its nodes will re-enter checks and routing.",
+  "确认禁用订阅 {{name}}？禁用后相关节点将立即退出平台路由。":
+    "Disable subscription {{name}}? Its nodes will immediately leave platform routing.",
+  "启用订阅": "Enable subscription",
+  "禁用订阅": "Disable subscription",
+  "启用订阅 {{name}}": "Enable subscription {{name}}",
+  "禁用订阅 {{name}}": "Disable subscription {{name}}",
   "确认删除订阅 {{name}}？关联节点会被清理。":
     "Delete subscription {{name}}? Related nodes will be cleaned.",
   "确认删除规则 {{prefix}} 吗？": "Delete rule {{prefix}}?",
