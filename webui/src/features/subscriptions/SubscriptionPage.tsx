@@ -389,11 +389,23 @@ export function SubscriptionPage() {
     }
 
     try {
-      const result = mergeUniqueSubscriptionLines(currentContent, await Promise.all(files.map((file) => file.text())));
-      setContent(result.content);
-      setContentLength(result.content.length);
-      setEditorExpanded(result.content.length < LARGE_SUBSCRIPTION_CONTENT_LENGTH);
-      showToast("success", t("已导入 {{added}} 条，跳过 {{duplicates}} 条重复内容", result));
+      const imported = await Promise.all(files.map((file) => file.text()));
+      const hasYaml = files.some((file) => /\.(ya?ml)$/i.test(file.name));
+      if (hasYaml) {
+        // YAML is indentation- and context-sensitive; line-level de-duplication
+        // can remove repeated keys from different mappings and corrupt it.
+        const content = imported[0] ?? "";
+        setContent(content);
+        setContentLength(content.length);
+        setEditorExpanded(content.length < LARGE_SUBSCRIPTION_CONTENT_LENGTH);
+        showToast("success", t("已导入 YAML 订阅文件"));
+      } else {
+        const result = mergeUniqueSubscriptionLines(currentContent, imported);
+        setContent(result.content);
+        setContentLength(result.content.length);
+        setEditorExpanded(result.content.length < LARGE_SUBSCRIPTION_CONTENT_LENGTH);
+        showToast("success", t("已导入 {{added}} 条，跳过 {{duplicates}} 条重复内容", result));
+      }
     } catch {
       showToast("error", t("读取订阅文本文件失败"));
     } finally {
@@ -1018,15 +1030,15 @@ export function SubscriptionPage() {
                           onClick={() => editImportInputRef.current?.click()}
                         >
                           <Upload size={14} />
-                          {t("导入 TXT")}
+                          {t("导入订阅文件")}
                         </Button>
                         <input
                           ref={editImportInputRef}
                           type="file"
-                          accept=".txt,text/plain"
+                          accept=".txt,.yaml,.yml,text/plain,application/yaml,text/yaml"
                           multiple
                           hidden
-                          aria-label={t("导入 TXT")}
+                          aria-label={t("导入订阅文件")}
                           onChange={(event) => void importLocalSubscriptionFiles(
                             event,
                             editForm.getValues("content"),
@@ -1306,15 +1318,15 @@ export function SubscriptionPage() {
                       onClick={() => createImportInputRef.current?.click()}
                     >
                       <Upload size={14} />
-                      {t("导入 TXT")}
+                      {t("导入订阅文件")}
                     </Button>
                     <input
                       ref={createImportInputRef}
                       type="file"
-                      accept=".txt,text/plain"
+                      accept=".txt,.yaml,.yml,text/plain,application/yaml,text/yaml"
                       multiple
                       hidden
-                      aria-label={t("导入 TXT")}
+                      aria-label={t("导入订阅文件")}
                       onChange={(event) => void importLocalSubscriptionFiles(
                         event,
                         createForm.getValues("content"),

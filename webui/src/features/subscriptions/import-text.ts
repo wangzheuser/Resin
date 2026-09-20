@@ -14,8 +14,8 @@ function forEachNormalizedLine(content: string, visit: (line: string) => void): 
     if (lineEnd > start && content.charCodeAt(lineEnd - 1) === 13) {
       lineEnd--;
     }
-    const line = content.slice(start, lineEnd).trim();
-    if (line) {
+    const line = content.slice(start, lineEnd);
+    if (line.trim()) {
       visit(line);
     }
     start = end + 1;
@@ -30,8 +30,9 @@ export function mergeUniqueSubscriptionLines(
   const seen = new Set<string>();
 
   forEachNormalizedLine(current, (line) => {
-    if (!seen.has(line)) {
-      seen.add(line);
+    const key = line.trim();
+    if (!seen.has(key)) {
+      seen.add(key);
       lines.push(line);
     }
   });
@@ -40,11 +41,12 @@ export function mergeUniqueSubscriptionLines(
   let duplicates = 0;
   for (const content of imported) {
     forEachNormalizedLine(content, (line) => {
-      if (seen.has(line)) {
+      const key = line.trim();
+      if (seen.has(key)) {
         duplicates++;
         return;
       }
-      seen.add(line);
+      seen.add(key);
       lines.push(line);
       added++;
     });
