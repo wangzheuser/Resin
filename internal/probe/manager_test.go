@@ -541,6 +541,170 @@ func TestScanLatency_SkipsDisabledNodes(t *testing.T) {
 	}
 }
 
+func TestScanEgress_CoalescesQueuedProbeWithoutReplay(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"scan-egress-coalesces-queued"}`))
+	pool.AddNodeFromSub(hash, []byte(`{"type":"scan-egress-coalesces-queued"}`), "sub1")
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	storeOutbound(entry)
+
+	calls := make(chan struct{}, 2)
+	mgr := NewProbeManager(ProbeConfig{
+		Pool:        pool,
+		Concurrency: 1,
+		Fetcher: func(_ node.Hash, _ string) ([]byte, time.Duration, error) {
+			calls <- struct{}{}
+			return []byte("ip=198.51.100.1"), 10 * time.Millisecond, nil
+		},
+	})
+
+	mgr.scanEgress()
+	mgr.scanEgress()
+	mgr.Start()
+	defer mgr.Stop()
+
+	select {
+	case <-calls:
+	case <-time.After(time.Second):
+		t.Fatal("queued egress probe did not execute")
+	}
+
+	select {
+	case <-calls:
+		t.Fatal("periodic scan replayed an already queued egress probe")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestScanLatency_CoalescesRunningProbeWithoutReplay(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"scan-latency-coalesces-running"}`))
+	pool.AddNodeFromSub(hash, []byte(`{"type":"scan-latency-coalesces-running"}`), "sub1")
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	storeOutbound(entry)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	mgr := NewProbeManager(ProbeConfig{
+		Pool:        pool,
+		Concurrency: 1,
+		Fetcher: func(_ node.Hash, _ string) ([]byte, time.Duration, error) {
+			if calls.Add(1) == 1 {
+				close(started)
+				<-release
+			}
+			return []byte("ok"), 10 * time.Millisecond, nil
+		},
+	})
+
+	mgr.scanLatency()
+	mgr.Start()
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+		mgr.Stop()
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("latency probe did not start")
+	}
+
+	mgr.scanLatency()
+	close(release)
+	released = true
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) && calls.Load() == 1 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("periodic scan replayed a running latency probe, calls=%d", got)
+	}
+}
+
+func TestTriggerImmediateLatencyProbe_ReplaysOnceWhenRunning(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"immediate-latency-replays-running"}`))
+	pool.AddNodeFromSub(hash, []byte(`{"type":"immediate-latency-replays-running"}`), "sub1")
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	storeOutbound(entry)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	calls := make(chan struct{}, 3)
+	var callCount atomic.Int32
+	mgr := NewProbeManager(ProbeConfig{
+		Pool:        pool,
+		Concurrency: 1,
+		Fetcher: func(_ node.Hash, _ string) ([]byte, time.Duration, error) {
+			calls <- struct{}{}
+			if callCount.Add(1) == 1 {
+				close(started)
+				<-release
+			}
+			return []byte("ok"), 10 * time.Millisecond, nil
+		},
+	})
+	mgr.Start()
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+		mgr.Stop()
+	}()
+
+	mgr.TriggerImmediateLatencyProbe(hash)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("immediate latency probe did not start")
+	}
+
+	mgr.TriggerImmediateLatencyProbe(hash)
+	close(release)
+	released = true
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-calls:
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for immediate probe call %d", i+1)
+		}
+	}
+	select {
+	case <-calls:
+		t.Fatal("immediate latency probe replayed more than once")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestQueuedAsyncProbe_SkipsNodeDisabledBeforeExecution(t *testing.T) {
 	subMgr := topology.NewSubscriptionManager()
 	sub := subscription.NewSubscription("sub1", "sub1", "url", true, false)

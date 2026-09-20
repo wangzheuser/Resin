@@ -517,7 +517,7 @@ func (m *ProbeManager) scanEgress() {
 			}
 		}
 
-		m.enqueueProbe(h, probeTaskKindEgress, probePriorityNormal)
+		m.enqueuePeriodicProbe(h, probeTaskKindEgress, probePriorityNormal)
 
 		return true
 	})
@@ -560,7 +560,7 @@ func (m *ProbeManager) scanLatency() {
 			return true
 		}
 
-		m.enqueueProbe(h, probeTaskKindLatency, probePriorityNormal)
+		m.enqueuePeriodicProbe(h, probeTaskKindLatency, probePriorityNormal)
 
 		return true
 	})
@@ -601,6 +601,19 @@ func (m *ProbeManager) executeTask(task probeTask) {
 }
 
 func (m *ProbeManager) enqueueProbe(hash node.Hash, kind probeTaskKind, priority probePriority) bool {
+	return m.enqueueProbeWithFollowUp(hash, kind, priority, true)
+}
+
+func (m *ProbeManager) enqueuePeriodicProbe(hash node.Hash, kind probeTaskKind, priority probePriority) bool {
+	return m.enqueueProbeWithFollowUp(hash, kind, priority, false)
+}
+
+func (m *ProbeManager) enqueueProbeWithFollowUp(
+	hash node.Hash,
+	kind probeTaskKind,
+	priority probePriority,
+	followUpOnDuplicate bool,
+) bool {
 	key := probeTaskKey{hash: hash, kind: kind}
 	state, _ := m.taskStates.LoadOrCompute(key, func() (*probeTaskState, bool) {
 		return &probeTaskState{}, false
@@ -610,6 +623,9 @@ func (m *ProbeManager) enqueueProbe(hash node.Hash, kind probeTaskKind, priority
 	for {
 		flags := state.flags.Load()
 		if flags&taskFlagRunning != 0 {
+			if !followUpOnDuplicate {
+				return false
+			}
 			next := flags | taskFlagDirty
 			if priority == probePriorityHigh {
 				next |= taskFlagDirtyHigh
@@ -621,6 +637,9 @@ func (m *ProbeManager) enqueueProbe(hash node.Hash, kind probeTaskKind, priority
 		}
 
 		if flags&taskFlagQueued != 0 {
+			if !followUpOnDuplicate {
+				return false
+			}
 			// If a normal-priority task is already queued, add a high-priority token
 			// so the next dequeue can observe the upgraded urgency. The stale normal
 			// token will later no-op when it reaches a worker.
