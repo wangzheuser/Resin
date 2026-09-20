@@ -33,6 +33,7 @@ var supportedOutboundTypes = map[string]bool{
 	"tor":         true,
 	"ssh":         true,
 	"naive":       true,
+	"masque":      true,
 }
 
 // ParsedNode represents a single parsed outbound from a subscription response.
@@ -220,7 +221,13 @@ func parseClashYAMLSubscription(text string) ([]ParsedNode, bool, error) {
 	if len(proxies) == 0 && len(cfg.ProxyLower) > 0 {
 		proxies = cfg.ProxyLower
 	}
-	return parseClashProxies(proxies), true, nil
+	nodes := parseClashProxies(proxies)
+	if len(nodes) == 0 && len(proxies) > 0 {
+		if unsupported := unsupportedClashProxyTypes(proxies); len(unsupported) > 0 {
+			return nil, true, fmt.Errorf("subscription: unsupported clash proxy type(s): %s", strings.Join(unsupported, ", "))
+		}
+	}
+	return nodes, true, nil
 }
 
 func parseClashProxies(proxies []map[string]any) []ParsedNode {
@@ -231,6 +238,31 @@ func parseClashProxies(proxies []map[string]any) []ParsedNode {
 		}
 	}
 	return nodes
+}
+
+// unsupportedClashProxyTypes returns proxy types that were present but could
+// not be converted. This is used by callers to distinguish an incompatible
+// Clash profile from an empty subscription.
+func unsupportedClashProxyTypes(proxies []map[string]any) []string {
+	seen := make(map[string]struct{})
+	for _, proxy := range proxies {
+		t := strings.ToLower(strings.TrimSpace(getString(proxy, "type")))
+		if t == "" {
+			continue
+		}
+		if _, exists := seen[t]; exists {
+			continue
+		}
+		if _, supported := supportedOutboundTypes[t]; !supported {
+			seen[t] = struct{}{}
+		}
+	}
+	types := make([]string, 0, len(seen))
+	for t := range seen {
+		types = append(types, t)
+	}
+	sort.Strings(types)
+	return types
 }
 
 type surgeProxyLine struct {
@@ -1180,6 +1212,34 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 	}
 
 	switch nodeType {
+	case "masque":
+		// MASQUE is implemented by Mihomo (not by sing-box); retain its
+		// native fields so HybridBuilder can dispatch it to Mihomo.
+		outbound := map[string]any{
+			"type": "masque", "tag": defaultTag(tag, "masque", server, port),
+			"server": server, "server_port": port,
+			"private_key": getString(proxy, "private-key", "private_key"),
+			"public_key":  getString(proxy, "public-key", "public_key"),
+			"ip":          getString(proxy, "ip"), "ipv6": getString(proxy, "ipv6"),
+			"mtu": port,
+		}
+		if mtu, ok := getUint(proxy, "mtu"); ok {
+			outbound["mtu"] = mtu
+		} else {
+			delete(outbound, "mtu")
+		}
+		for dst, src := range map[string]string{"udp": "udp", "sni": "sni", "network": "network", "remote_dns_resolve": "remote-dns-resolve"} {
+			if v, ok := getBool(proxy, src); ok && dst != "sni" && dst != "network" {
+				outbound[dst] = v
+			}
+			if v := getString(proxy, src); v != "" && (dst == "sni" || dst == "network") {
+				outbound[dst] = v
+			}
+		}
+		if dns := getStringSlice(proxy, "dns"); len(dns) > 0 {
+			outbound["dns"] = dns
+		}
+		return buildParsedNode(outbound)
 	case "ss", "shadowsocks":
 		method := normalizeShadowsocksMethod(firstNonEmpty(getString(proxy, "cipher"), getString(proxy, "method")))
 		password := strings.TrimSpace(getString(proxy, "password"))

@@ -32,8 +32,13 @@ func (b *HybridBuilder) Build(rawOptions json.RawMessage, relayPlatformIDs ...st
 			Type string `json:"type"`
 		} `json:"transport"`
 	}
-	if err := json.Unmarshal(rawOptions, &header); err != nil ||
-		header.Type != "vless" || header.Transport.Type != "xhttp" {
+	if err := json.Unmarshal(rawOptions, &header); err != nil {
+		return b.fallback.Build(rawOptions, relayPlatformID)
+	}
+	if header.Type == "masque" {
+		return b.buildMasque(rawOptions, relayPlatformID)
+	}
+	if header.Type != "vless" || header.Transport.Type != "xhttp" {
 		return b.fallback.Build(rawOptions, relayPlatformID)
 	}
 
@@ -102,6 +107,54 @@ func (b *HybridBuilder) Build(rawOptions json.RawMessage, relayPlatformIDs ...st
 	return &mihomoXHTTPOutbound{tag: cfg.Tag, client: client, udp: cfg.UDP}, nil
 }
 
+type masqueOutboundConfig struct {
+	Tag              string   `json:"tag"`
+	Server           string   `json:"server"`
+	ServerPort       int      `json:"server_port"`
+	PrivateKey       string   `json:"private_key"`
+	PublicKey        string   `json:"public_key"`
+	IP               string   `json:"ip"`
+	IPv6             string   `json:"ipv6"`
+	MTU              int      `json:"mtu"`
+	UDP              bool     `json:"udp"`
+	SNI              string   `json:"sni"`
+	Network          string   `json:"network"`
+	RemoteDNSResolve bool     `json:"remote_dns_resolve"`
+	DNS              []string `json:"dns"`
+}
+
+func (b *HybridBuilder) buildMasque(raw json.RawMessage, relayPlatformID string) (adapter.Outbound, error) {
+	var cfg masqueOutboundConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, fmt.Errorf("parse masque outbound: %w", err)
+	}
+	if cfg.Server == "" || cfg.ServerPort == 0 || cfg.PrivateKey == "" || cfg.PublicKey == "" {
+		return nil, fmt.Errorf("parse masque outbound: server, server_port, private_key and public_key are required")
+	}
+	option := mihomoOutbound.MasqueOption{Name: cfg.Tag, Server: cfg.Server, Port: cfg.ServerPort, PrivateKey: cfg.PrivateKey, PublicKey: cfg.PublicKey, Ip: cfg.IP, Ipv6: cfg.IPv6, MTU: cfg.MTU, UDP: cfg.UDP, SNI: cfg.SNI, Network: cfg.Network}
+	// The Docker host has no routable IPv6 path; prefer IPv4 for destination
+	// resolution while retaining the node's advertised IPv6 address.
+	option.IPVersion = MC.IPv4Prefer
+	if relayPlatformID != "" {
+		provider, ok := b.fallback.(interface {
+			RelayDialer(string) (*platformRelayDialer, error)
+		})
+		if !ok {
+			return nil, fmt.Errorf("masque relay platform runtime is not configured")
+		}
+		dialer, err := provider.RelayDialer(relayPlatformID)
+		if err != nil {
+			return nil, err
+		}
+		option.DialerForAPI = &mihomoRelayDialer{dialer: dialer}
+	}
+	client, err := mihomoOutbound.NewMasque(option)
+	if err != nil {
+		return nil, fmt.Errorf("build masque outbound: %w", err)
+	}
+	return &mihomoMasqueOutbound{tag: cfg.Tag, client: client, udp: cfg.UDP}, nil
+}
+
 type xhttpOutboundConfig struct {
 	Tag         string `json:"tag"`
 	Server      string `json:"server"`
@@ -145,6 +198,35 @@ type mihomoXHTTPOutbound struct {
 	client *mihomoOutbound.Vless
 	udp    bool
 }
+
+type mihomoMasqueOutbound struct {
+	tag    string
+	client *mihomoOutbound.Masque
+	udp    bool
+}
+
+func (o *mihomoMasqueOutbound) Type() string           { return "masque" }
+func (o *mihomoMasqueOutbound) Tag() string            { return o.tag }
+func (o *mihomoMasqueOutbound) Dependencies() []string { return nil }
+func (o *mihomoMasqueOutbound) Network() []string {
+	if o.udp {
+		return []string{"tcp", "udp"}
+	}
+	return []string{"tcp"}
+}
+func (o *mihomoMasqueOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	if !strings.HasPrefix(network, "tcp") {
+		return nil, fmt.Errorf("masque outbound: unsupported network %q", network)
+	}
+	return o.client.DialContext(ctx, mihomoMetadata(MC.TCP, destination))
+}
+func (o *mihomoMasqueOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	if !o.udp {
+		return nil, fmt.Errorf("masque outbound: udp is disabled")
+	}
+	return o.client.ListenPacketContext(ctx, mihomoMetadata(MC.UDP, destination))
+}
+func (o *mihomoMasqueOutbound) Close() error { return o.client.Close() }
 
 func (o *mihomoXHTTPOutbound) Type() string           { return "vless" }
 func (o *mihomoXHTTPOutbound) Tag() string            { return o.tag }
