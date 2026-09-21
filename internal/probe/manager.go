@@ -69,6 +69,8 @@ type ProbeManager struct {
 	latencyAuthorities              func() []string
 	onProbeEvent                    func(kind string)
 	failureReporter                 *probeFailureReporter
+	periodicQueueDroppedEgress      atomic.Uint64
+	periodicQueueDroppedLatency     atomic.Uint64
 }
 
 const (
@@ -327,7 +329,9 @@ func (m *ProbeManager) runFailureReporter() {
 // flushFailureSummary emits one bounded log record for the current window.
 func (m *ProbeManager) flushFailureSummary() {
 	snapshot := m.failureReporter.Drain()
-	if snapshot.Empty() {
+	periodicQueueDroppedEgress := m.periodicQueueDroppedEgress.Swap(0)
+	periodicQueueDroppedLatency := m.periodicQueueDroppedLatency.Swap(0)
+	if snapshot.Empty() && periodicQueueDroppedEgress == 0 && periodicQueueDroppedLatency == 0 {
 		return
 	}
 	egressFetch := snapshot.buckets[probeFailureEgressFetch]
@@ -335,6 +339,7 @@ func (m *ProbeManager) flushFailureSummary() {
 	latency := snapshot.buckets[probeFailureLatency]
 	log.Printf(
 		"[probe] failure summary interval=%s egress_fetch=%d egress_parse=%d latency=%d "+
+			"periodic_queue_dropped_egress=%d periodic_queue_dropped_latency=%d "+
 			"egress_fetch_sample_node=%s egress_fetch_sample=%q "+
 			"egress_parse_sample_node=%s egress_parse_sample=%q "+
 			"latency_sample_node=%s latency_sample=%q",
@@ -342,6 +347,8 @@ func (m *ProbeManager) flushFailureSummary() {
 		egressFetch.count,
 		egressParse.count,
 		latency.count,
+		periodicQueueDroppedEgress,
+		periodicQueueDroppedLatency,
 		egressFetch.sampleNode,
 		egressFetch.sampleError,
 		egressParse.sampleNode,
@@ -517,7 +524,9 @@ func (m *ProbeManager) scanEgress() {
 			}
 		}
 
-		m.enqueuePeriodicProbe(h, probeTaskKindEgress, probePriorityNormal)
+		if !m.enqueuePeriodicProbe(h, probeTaskKindEgress, probePriorityNormal) {
+			m.periodicQueueDroppedEgress.Add(1)
+		}
 
 		return true
 	})
@@ -560,7 +569,9 @@ func (m *ProbeManager) scanLatency() {
 			return true
 		}
 
-		m.enqueuePeriodicProbe(h, probeTaskKindLatency, probePriorityNormal)
+		if !m.enqueuePeriodicProbe(h, probeTaskKindLatency, probePriorityNormal) {
+			m.periodicQueueDroppedLatency.Add(1)
+		}
 
 		return true
 	})

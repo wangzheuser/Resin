@@ -276,6 +276,31 @@ func TestScheduler_UpdateSubscription_LocalSubscription_ParseFailure(t *testing.
 	}
 }
 
+func TestScheduler_UpdateSubscription_EmptyRecognizedContentPreservesNodes(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	sub := subscription.NewSubscription("s1", "LocalSub", "", true, false)
+	sub.SetFetchConfig("", int64(time.Hour))
+	sub.SetSourceType(subscription.SourceTypeLocal)
+	sub.SetContent(`{"outbounds":[{"type":"shadowsocks","tag":"local-ss","server":"1.1.1.1","server_port":443}]}`)
+	subMgr.Register(sub)
+
+	pool := newTestPool(subMgr)
+	sched := newTestScheduler(subMgr, pool, nil)
+	sched.UpdateSubscription(sub)
+	if pool.Size() != 1 {
+		t.Fatalf("expected initial node, got %d", pool.Size())
+	}
+
+	sub.SetContent(`{"proxies":[]}`)
+	sched.UpdateSubscription(sub)
+	if pool.Size() != 1 {
+		t.Fatalf("empty recognized content must preserve previous node, got %d", pool.Size())
+	}
+	if sub.GetLastError() == "" {
+		t.Fatal("expected empty subscription parse error")
+	}
+}
+
 // --- Test: Swap-before-add/remove ordering ---
 
 func TestScheduler_UpdateSubscription_SwapBeforePoolMutation(t *testing.T) {

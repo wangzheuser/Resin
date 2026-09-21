@@ -2,6 +2,7 @@ package topology
 
 import (
 	"context"
+	"errors"
 	"log"
 	"runtime"
 	"sync"
@@ -218,6 +219,10 @@ func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscriptio
 	parsed, err := subscription.ParseGeneralSubscription(body)
 	if err != nil {
 		s.handleUpdateFailure(sub, attemptStartedNs, attemptSeq, attemptConfigVersion, "parse", err)
+		return
+	}
+	if len(parsed) == 0 {
+		s.handleUpdateFailure(sub, attemptStartedNs, attemptSeq, attemptConfigVersion, "parse", errors.New("subscription parsed zero supported nodes"))
 		return
 	}
 

@@ -699,7 +699,7 @@ export function SubscriptionPage() {
       }),
       col.display({
         id: "node_count",
-        header: t("节点数"),
+        header: t("健康 / 总数"),
         cell: (info) => {
           const s = info.row.original;
           return `${s.healthy_node_count} / ${s.node_count}`;

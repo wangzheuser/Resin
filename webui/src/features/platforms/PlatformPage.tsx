@@ -211,7 +211,7 @@ export function PlatformPage() {
                     {t("{{count}} 个可用节点", { count: platform.routable_node_count })}
                   </span>
                   <span className="platform-tile-meta platform-tile-updated">
-                    {t("更新于 {{time}}", { time: formatRelativeTime(platform.updated_at) })}
+                    {t("配置更新于 {{time}}", { time: formatRelativeTime(platform.updated_at) })}
                   </span>
                 </div>
               </button>
