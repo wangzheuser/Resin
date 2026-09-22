@@ -18,3 +18,10 @@ start-instance.sh
 .spec-workflow/
 data/
 AGENTS.md
+
+# WorkBuddy AI / Codex local runtime data
+.workbuddy-ai/
+.codex-artifacts/
+
+# Local machine-specific compose override (points at host restore volumes)
+docker-compose.override.yml

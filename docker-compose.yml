@@ -16,6 +16,9 @@ services:
       RESIN_PROBE_CONCURRENCY: ${RESIN_PROBE_CONCURRENCY:-128}
       # 默认平台粘性会话 TTL，从 .env 读取；未设置时回退到 168h（与程序内置默认一致）
       RESIN_DEFAULT_PLATFORM_STICKY_TTL: ${RESIN_DEFAULT_PLATFORM_STICKY_TTL:-168h}
+      # 请求日志库大小与保留个数（env-only，见 internal/config/env.go；未声明时 .env 中的值不会传入容器）
+      RESIN_REQUEST_LOG_DB_MAX_MB: ${RESIN_REQUEST_LOG_DB_MAX_MB:-128}
+      RESIN_REQUEST_LOG_DB_RETAIN_COUNT: ${RESIN_REQUEST_LOG_DB_RETAIN_COUNT:-5}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
       - "${RESIN_PORT}:${RESIN_PORT}"
