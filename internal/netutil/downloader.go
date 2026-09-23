@@ -16,7 +16,7 @@ type HTTPStatusError struct {
 }
 
 func (e *HTTPStatusError) Error() string {
-	return fmt.Sprintf("downloader: unexpected status %d from %s", e.StatusCode, e.URL)
+	return fmt.Sprintf("downloader: unexpected status %d from %s", e.StatusCode, RedactURL(e.URL))
 }
 
 // NonRetryableError indicates direct request setup failed before any transport

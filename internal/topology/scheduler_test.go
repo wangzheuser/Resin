@@ -210,6 +210,25 @@ func TestScheduler_UpdateSubscription_FetchFailure(t *testing.T) {
 	}
 }
 
+func TestScheduler_UpdateSubscription_FetchFailureRedactsURL(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	sub := subscription.NewSubscription("s1", "TestSub", "https://example.com", true, false)
+	subMgr.Register(sub)
+
+	pool := newTestPool(subMgr)
+	fetcher := makeMockFetcher(nil, &netutil.HTTPStatusError{
+		StatusCode: 404,
+		URL:        "https://user:pass@example.com/path-secret?token=secret",
+	})
+	sched := newTestScheduler(subMgr, pool, fetcher)
+
+	sched.UpdateSubscription(sub)
+
+	if got := sub.GetLastError(); got != "downloader: unexpected status 404 from https://example.com" {
+		t.Fatalf("redacted LastError: got %q", got)
+	}
+}
+
 // --- Test: UpdateSubscription parse failure ---
 
 func TestScheduler_UpdateSubscription_ParseFailure(t *testing.T) {

@@ -965,6 +965,27 @@ func TestProbeQueue_FullDropsWithoutBlocking(t *testing.T) {
 	}
 }
 
+func TestPeriodicEnqueueOutcomeDistinguishesDuplicateAndFull(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+	hash1 := node.HashFromRawOptions([]byte(`{"type":"periodic-queued"}`))
+	hash2 := node.HashFromRawOptions([]byte(`{"type":"periodic-full"}`))
+	mgr := NewProbeManager(ProbeConfig{Pool: pool, Concurrency: 1, QueueCapacity: 1})
+	defer mgr.Stop()
+
+	if got := mgr.enqueuePeriodicProbe(hash1, probeTaskKindLatency, probePriorityNormal); got != probeEnqueueAccepted {
+		t.Fatalf("first enqueue: got %v, want accepted", got)
+	}
+	if got := mgr.enqueuePeriodicProbe(hash1, probeTaskKindLatency, probePriorityNormal); got != probeEnqueueDuplicate {
+		t.Fatalf("same task: got %v, want duplicate", got)
+	}
+	if got := mgr.enqueuePeriodicProbe(hash2, probeTaskKindLatency, probePriorityNormal); got != probeEnqueueQueueFull {
+		t.Fatalf("second task: got %v, want queue full", got)
+	}
+}
+
 func TestProbeSync_BypassesAsyncWorkerLimit(t *testing.T) {
 	pool := topology.NewGlobalNodePool(topology.PoolConfig{
 		MaxLatencyTableEntries: 16,

@@ -368,6 +368,7 @@ func (s *SubscriptionScheduler) handleUpdateFailure(
 	stage string,
 	err error,
 ) {
+	safeMessage := netutil.RedactErrorMessage(err.Error())
 	applied := false
 	sub.WithOpLock(func() {
 		// If refresh-input config changed while this attempt was in-flight, discard.
@@ -379,15 +380,15 @@ func (s *SubscriptionScheduler) handleUpdateFailure(
 		}
 		now := time.Now().UnixNano()
 		sub.LastCheckedNs.Store(now)
-		sub.SetLastError(err.Error())
+		sub.SetLastError(safeMessage)
 		applied = true
 	})
 	if !applied {
-		log.Printf("[scheduler] stale %s failure ignored for %s: %v", stage, sub.ID, err)
+		log.Printf("[scheduler] stale %s failure ignored for %s: %s", stage, sub.ID, safeMessage)
 		return
 	}
 
-	log.Printf("[scheduler] %s %s failed: %v", stage, sub.ID, err)
+	log.Printf("[scheduler] %s %s failed: %s", stage, sub.ID, safeMessage)
 	if s.onSubUpdated != nil {
 		s.onSubUpdated(sub)
 	}

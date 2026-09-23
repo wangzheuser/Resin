@@ -69,8 +69,10 @@ type ProbeManager struct {
 	latencyAuthorities              func() []string
 	onProbeEvent                    func(kind string)
 	failureReporter                 *probeFailureReporter
-	periodicQueueDroppedEgress      atomic.Uint64
-	periodicQueueDroppedLatency     atomic.Uint64
+	periodicQueueFullEgress         atomic.Uint64
+	periodicQueueFullLatency        atomic.Uint64
+	periodicDuplicateEgress         atomic.Uint64
+	periodicDuplicateLatency        atomic.Uint64
 }
 
 const (
@@ -107,6 +109,14 @@ type probeTask struct {
 type probeTaskState struct {
 	flags atomic.Uint32
 }
+
+type probeEnqueueOutcome uint8
+
+const (
+	probeEnqueueAccepted probeEnqueueOutcome = iota
+	probeEnqueueDuplicate
+	probeEnqueueQueueFull
+)
 
 const (
 	taskFlagQueued uint32 = 1 << iota
@@ -329,8 +339,12 @@ func (m *ProbeManager) runFailureReporter() {
 // flushFailureSummary emits one bounded log record for the current window.
 func (m *ProbeManager) flushFailureSummary() {
 	snapshot := m.failureReporter.Drain()
-	periodicQueueDroppedEgress := m.periodicQueueDroppedEgress.Swap(0)
-	periodicQueueDroppedLatency := m.periodicQueueDroppedLatency.Swap(0)
+	periodicQueueFullEgress := m.periodicQueueFullEgress.Swap(0)
+	periodicQueueFullLatency := m.periodicQueueFullLatency.Swap(0)
+	periodicDuplicateEgress := m.periodicDuplicateEgress.Swap(0)
+	periodicDuplicateLatency := m.periodicDuplicateLatency.Swap(0)
+	periodicQueueDroppedEgress := periodicQueueFullEgress + periodicDuplicateEgress
+	periodicQueueDroppedLatency := periodicQueueFullLatency + periodicDuplicateLatency
 	if snapshot.Empty() && periodicQueueDroppedEgress == 0 && periodicQueueDroppedLatency == 0 {
 		return
 	}
@@ -340,6 +354,8 @@ func (m *ProbeManager) flushFailureSummary() {
 	log.Printf(
 		"[probe] failure summary interval=%s egress_fetch=%d egress_parse=%d latency=%d "+
 			"periodic_queue_dropped_egress=%d periodic_queue_dropped_latency=%d "+
+			"periodic_queue_full_egress=%d periodic_queue_full_latency=%d "+
+			"periodic_duplicate_egress=%d periodic_duplicate_latency=%d "+
 			"egress_fetch_sample_node=%s egress_fetch_sample=%q "+
 			"egress_parse_sample_node=%s egress_parse_sample=%q "+
 			"latency_sample_node=%s latency_sample=%q",
@@ -349,6 +365,10 @@ func (m *ProbeManager) flushFailureSummary() {
 		latency.count,
 		periodicQueueDroppedEgress,
 		periodicQueueDroppedLatency,
+		periodicQueueFullEgress,
+		periodicQueueFullLatency,
+		periodicDuplicateEgress,
+		periodicDuplicateLatency,
 		egressFetch.sampleNode,
 		egressFetch.sampleError,
 		egressParse.sampleNode,
@@ -524,8 +544,11 @@ func (m *ProbeManager) scanEgress() {
 			}
 		}
 
-		if !m.enqueuePeriodicProbe(h, probeTaskKindEgress, probePriorityNormal) {
-			m.periodicQueueDroppedEgress.Add(1)
+		switch m.enqueuePeriodicProbe(h, probeTaskKindEgress, probePriorityNormal) {
+		case probeEnqueueQueueFull:
+			m.periodicQueueFullEgress.Add(1)
+		case probeEnqueueDuplicate:
+			m.periodicDuplicateEgress.Add(1)
 		}
 
 		return true
@@ -569,8 +592,11 @@ func (m *ProbeManager) scanLatency() {
 			return true
 		}
 
-		if !m.enqueuePeriodicProbe(h, probeTaskKindLatency, probePriorityNormal) {
-			m.periodicQueueDroppedLatency.Add(1)
+		switch m.enqueuePeriodicProbe(h, probeTaskKindLatency, probePriorityNormal) {
+		case probeEnqueueQueueFull:
+			m.periodicQueueFullLatency.Add(1)
+		case probeEnqueueDuplicate:
+			m.periodicDuplicateLatency.Add(1)
 		}
 
 		return true
@@ -612,10 +638,10 @@ func (m *ProbeManager) executeTask(task probeTask) {
 }
 
 func (m *ProbeManager) enqueueProbe(hash node.Hash, kind probeTaskKind, priority probePriority) bool {
-	return m.enqueueProbeWithFollowUp(hash, kind, priority, true)
+	return m.enqueueProbeWithFollowUp(hash, kind, priority, true) == probeEnqueueAccepted
 }
 
-func (m *ProbeManager) enqueuePeriodicProbe(hash node.Hash, kind probeTaskKind, priority probePriority) bool {
+func (m *ProbeManager) enqueuePeriodicProbe(hash node.Hash, kind probeTaskKind, priority probePriority) probeEnqueueOutcome {
 	return m.enqueueProbeWithFollowUp(hash, kind, priority, false)
 }
 
@@ -624,7 +650,7 @@ func (m *ProbeManager) enqueueProbeWithFollowUp(
 	kind probeTaskKind,
 	priority probePriority,
 	followUpOnDuplicate bool,
-) bool {
+) probeEnqueueOutcome {
 	key := probeTaskKey{hash: hash, kind: kind}
 	state, _ := m.taskStates.LoadOrCompute(key, func() (*probeTaskState, bool) {
 		return &probeTaskState{}, false
@@ -635,21 +661,21 @@ func (m *ProbeManager) enqueueProbeWithFollowUp(
 		flags := state.flags.Load()
 		if flags&taskFlagRunning != 0 {
 			if !followUpOnDuplicate {
-				return false
+				return probeEnqueueDuplicate
 			}
 			next := flags | taskFlagDirty
 			if priority == probePriorityHigh {
 				next |= taskFlagDirtyHigh
 			}
 			if state.flags.CompareAndSwap(flags, next) {
-				return false
+				return probeEnqueueDuplicate
 			}
 			continue
 		}
 
 		if flags&taskFlagQueued != 0 {
 			if !followUpOnDuplicate {
-				return false
+				return probeEnqueueDuplicate
 			}
 			// If a normal-priority task is already queued, add a high-priority token
 			// so the next dequeue can observe the upgraded urgency. The stale normal
@@ -660,7 +686,7 @@ func (m *ProbeManager) enqueueProbeWithFollowUp(
 					continue
 				}
 				if m.taskQueue.Enqueue(probeTask{key: key}, probePriorityHigh) {
-					return true
+					return probeEnqueueAccepted
 				}
 				for {
 					current := state.flags.Load()
@@ -678,7 +704,7 @@ func (m *ProbeManager) enqueueProbeWithFollowUp(
 				next |= taskFlagDirtyHigh
 			}
 			if state.flags.CompareAndSwap(flags, next) {
-				return false
+				return probeEnqueueDuplicate
 			}
 			continue
 		}
@@ -694,12 +720,12 @@ func (m *ProbeManager) enqueueProbeWithFollowUp(
 		}
 
 		if m.taskQueue.Enqueue(probeTask{key: key}, priority) {
-			return true
+			return probeEnqueueAccepted
 		}
 
 		m.clearDroppedState(state)
 		m.tryDeleteTaskState(key, state)
-		return false
+		return probeEnqueueQueueFull
 	}
 }
 

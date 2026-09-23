@@ -1,5 +1,11 @@
 .git
 .agents
+.codex-artifacts
+.local
+.omx
+.setting
+.spec-workflow
+.workbuddy-ai
 resin
 sing-box-reference
 node_modules
