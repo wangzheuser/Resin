@@ -27,7 +27,7 @@ services:
       - resin_state:/var/lib/resin
       - resin_log:/var/log/resin
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${RESIN_PORT}/healthz >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${RESIN_PORT}/readyz >/dev/null || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

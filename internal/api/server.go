@@ -63,6 +63,8 @@ func NewServerWithAddress(
 
 	// Public (no auth)
 	mux.Handle("GET /healthz", HandleHealthz())
+	// Readiness is public so Docker can probe it without exposing credentials.
+	mux.Handle("GET /readyz", HandleReadyz(metricsManager, 0, 0))
 
 	// Authenticated routes
 	authed := http.NewServeMux()

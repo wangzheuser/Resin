@@ -109,6 +109,8 @@ func shouldRouteControlPlane(r *http.Request) bool {
 		return true
 	case p == "/healthz":
 		return true
+	case p == "/readyz":
+		return true
 	case p == "/api" || strings.HasPrefix(p, "/api/"):
 		return true
 	case p == "/ui" || strings.HasPrefix(p, "/ui/"):

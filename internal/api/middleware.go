@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 )
@@ -29,7 +30,7 @@ func AuthMiddleware(adminToken string, next http.Handler) http.Handler {
 		}
 
 		token := auth[len(prefix):]
-		if token != adminToken {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(adminToken)) != 1 {
 			WriteError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid admin token")
 			return
 		}

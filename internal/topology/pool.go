@@ -540,9 +540,23 @@ func (p *GlobalNodePool) RecordResult(hash node.Hash, success bool) {
 			circuitStateChanged = true
 		}
 	} else {
-		newCount := entry.FailureCount.Add(1)
-		dynamicChanged = true
 		maxConsecutiveFailures := p.currentMaxConsecutiveFailures()
+		if maxConsecutiveFailures <= 0 {
+			maxConsecutiveFailures = 1
+		}
+		newCount := int32(0)
+		for {
+			current := entry.FailureCount.Load()
+			if current >= int32(maxConsecutiveFailures) {
+				newCount = current
+				break
+			}
+			if entry.FailureCount.CompareAndSwap(current, current+1) {
+				newCount = current + 1
+				break
+			}
+		}
+		dynamicChanged = true
 		if maxConsecutiveFailures > 0 && int(newCount) >= maxConsecutiveFailures {
 			// Open circuit if not already open.
 			if entry.CircuitOpenSince.CompareAndSwap(0, time.Now().UnixNano()) {

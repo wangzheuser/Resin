@@ -3,6 +3,7 @@ package requestlog
 import (
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Resinat/Resin/internal/proxy"
@@ -18,8 +19,9 @@ type Service struct {
 	interval  time.Duration
 	flushReq  chan chan struct{}
 
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	stopCh  chan struct{}
+	wg      sync.WaitGroup
+	dropped atomic.Uint64
 }
 
 // ServiceConfig configures the request log service.
@@ -78,7 +80,16 @@ func (s *Service) EmitRequestLog(entry proxy.RequestLogEntry) {
 	case s.queue <- entry:
 	default:
 		// Queue full — drop entry to avoid blocking hot path.
+		s.dropped.Add(1)
 	}
+}
+
+// DroppedCount returns the number of entries dropped because the queue was full.
+func (s *Service) DroppedCount() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.dropped.Load()
 }
 
 // FlushNow asks the background writer to flush current buffered data to DB,

@@ -76,11 +76,12 @@ type ProbeManager struct {
 }
 
 const (
-	egressTraceURL        = "https://cloudflare.com/cdn-cgi/trace"
-	egressTraceDomain     = "cloudflare.com"
-	defaultLatencyTestURL = "https://www.gstatic.com/generate_204"
-	defaultQueueCap       = 1024
-	probeFailureInterval  = time.Minute
+	egressTraceURL          = "https://cloudflare.com/cdn-cgi/trace"
+	egressTraceDomain       = "cloudflare.com"
+	defaultLatencyTestURL   = "https://www.gstatic.com/generate_204"
+	defaultQueueCap         = 1024
+	probeFailureInterval    = time.Minute
+	circuitRecoveryInterval = 5 * time.Minute
 )
 
 type probePriority uint8
@@ -535,8 +536,27 @@ func (m *ProbeManager) scanEgress() {
 			return true // skip nil outbound
 		}
 
-		// Check if due: lastAttempt + interval - lookahead <= now.
+		// Circuit-open nodes use a sparse recovery probe instead of the normal
+		// egress cadence. This prevents a large failed pool from being probed at
+		// full pressure while still allowing recovery without a restart.
 		lastCheck := entry.LastEgressUpdateAttempt.Load()
+		if entry.IsCircuitOpen() {
+			if lastCheck > 0 {
+				nextRecovery := time.Unix(0, lastCheck).Add(circuitRecoveryInterval).Add(-lookahead)
+				if now.Before(nextRecovery) {
+					return true
+				}
+			}
+			switch m.enqueuePeriodicProbe(h, probeTaskKindEgress, probePriorityNormal) {
+			case probeEnqueueQueueFull:
+				m.periodicQueueFullEgress.Add(1)
+			case probeEnqueueDuplicate:
+				m.periodicDuplicateEgress.Add(1)
+			}
+			return true
+		}
+
+		// Check if due: lastAttempt + interval - lookahead <= now.
 		if lastCheck > 0 {
 			nextDue := time.Unix(0, lastCheck).Add(interval).Add(-lookahead)
 			if now.Before(nextDue) {
@@ -586,6 +606,12 @@ func (m *ProbeManager) scanLatency() {
 
 		if entry.Outbound.Load() == nil {
 			return true // skip nil outbound
+		}
+
+		// Latency target failures are target-scoped signals and must not keep
+		// hammering nodes that are already circuit-open.
+		if entry.IsCircuitOpen() {
+			return true
 		}
 
 		if !m.isLatencyProbeDue(entry, now, maxLatencyInterval, maxAuthorityInterval, authorities, lookahead) {
@@ -914,12 +940,10 @@ func (m *ProbeManager) performLatencyProbe(hash node.Hash, testURL string) error
 	domain := netutil.ExtractDomain(testURL)
 	_, latency, err := m.fetcher(hash, testURL)
 	if err != nil {
-		m.pool.RecordResult(hash, false)
 		m.pool.RecordLatency(hash, domain, nil)
 		return err
 	}
 
-	m.pool.RecordResult(hash, true)
 	m.pool.RecordLatency(hash, domain, &latency)
 	return nil
 }

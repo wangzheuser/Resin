@@ -226,7 +226,7 @@ func TestProbeLatency_Success(t *testing.T) {
 	}
 }
 
-// TestProbeLatency_Failure verifies latency probe failure calls RecordResult(false).
+// TestProbeLatency_Failure verifies latency probe failure remains target-scoped.
 func TestProbeLatency_Failure(t *testing.T) {
 	pool := topology.NewGlobalNodePool(topology.PoolConfig{
 		MaxLatencyTableEntries: 16,
@@ -251,8 +251,8 @@ func TestProbeLatency_Failure(t *testing.T) {
 
 	mgr.probeLatency(hash, entry, "https://www.gstatic.com/generate_204")
 
-	if entry.FailureCount.Load() != 1 {
-		t.Fatalf("expected 1 failure, got %d", entry.FailureCount.Load())
+	if entry.FailureCount.Load() != 0 {
+		t.Fatalf("expected 0 node failures, got %d", entry.FailureCount.Load())
 	}
 	if got := mgr.failureReporter.Drain().buckets[probeFailureLatency].count; got != 1 {
 		t.Fatalf("latency failure summary count: got %d, want 1", got)
@@ -595,6 +595,9 @@ func TestScanLatency_CoalescesRunningProbeWithoutReplay(t *testing.T) {
 	if !ok {
 		t.Fatal("entry not found")
 	}
+	// Exercise queue coalescing for a routable node; new nodes start
+	// circuit-open until their first egress probe succeeds.
+	entry.CircuitOpenSince.Store(0)
 	storeOutbound(entry)
 
 	started := make(chan struct{})

@@ -83,6 +83,7 @@ func TestInboundMux_RoutesAPIForControlPlanePaths(t *testing.T) {
 	cases := []string{
 		"/",
 		"/healthz",
+		"/readyz",
 		"/api",
 		"/api/v1/system/info",
 		"/ui",
