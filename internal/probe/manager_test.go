@@ -2,6 +2,7 @@ package probe
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"strings"
 	"sync"
@@ -965,6 +966,68 @@ func TestProbeQueue_FullDropsWithoutBlocking(t *testing.T) {
 	}
 	if ok := mgr.enqueueProbe(hash2, probeTaskKindEgress, probePriorityNormal); ok {
 		t.Fatal("second enqueue should be dropped when queue is full")
+	}
+}
+
+func TestPeriodicScansCapBatchSize(t *testing.T) {
+	for _, kind := range []probeTaskKind{probeTaskKindEgress, probeTaskKindLatency} {
+		t.Run(fmt.Sprintf("kind-%d", kind), func(t *testing.T) {
+			pool := topology.NewGlobalNodePool(topology.PoolConfig{
+				MaxLatencyTableEntries: 16,
+				MaxConsecutiveFailures: func() int { return 3 },
+			})
+			for i := 0; i < periodicProbeBatchLimit+32; i++ {
+				hash := node.HashFromRawOptions([]byte(fmt.Sprintf(`{"type":"batch-%d"}`, i)))
+				pool.AddNodeFromSub(hash, []byte(fmt.Sprintf(`{"type":"batch-%d"}`, i)), "sub1")
+				entry, ok := pool.GetEntry(hash)
+				if !ok {
+					t.Fatalf("entry %d not found", i)
+				}
+				storeOutbound(entry)
+				if kind == probeTaskKindLatency {
+					entry.CircuitOpenSince.Store(0)
+				}
+			}
+
+			mgr := NewProbeManager(ProbeConfig{Pool: pool, Concurrency: 1})
+			defer mgr.Stop()
+			if kind == probeTaskKindEgress {
+				mgr.scanEgress()
+			} else {
+				mgr.scanLatency()
+			}
+
+			mgr.taskQueue.mu.Lock()
+			got := mgr.taskQueue.high.len() + mgr.taskQueue.normal.len()
+			mgr.taskQueue.mu.Unlock()
+			if got != periodicProbeBatchLimit {
+				t.Fatalf("queued probes = %d, want %d", got, periodicProbeBatchLimit)
+			}
+		})
+	}
+}
+
+func TestNewProbeManager_DefaultsProbeConcurrency(t *testing.T) {
+	mgr := NewProbeManager(ProbeConfig{})
+	defer mgr.Stop()
+	if mgr.workerCount != defaultProbeConcurrency {
+		t.Fatalf("worker count = %d, want %d", mgr.workerCount, defaultProbeConcurrency)
+	}
+}
+
+func TestProbeStartLimiterSpacesStarts(t *testing.T) {
+	mgr := NewProbeManager(ProbeConfig{})
+	defer mgr.Stop()
+
+	if !mgr.waitForProbeStart() {
+		t.Fatal("first probe start should be admitted")
+	}
+	startedAt := time.Now()
+	if !mgr.waitForProbeStart() {
+		t.Fatal("second probe start should be admitted")
+	}
+	if elapsed := time.Since(startedAt); elapsed < probeStartInterval-20*time.Millisecond {
+		t.Fatalf("second probe started after %v, want at least %v", elapsed, probeStartInterval-20*time.Millisecond)
 	}
 }
 

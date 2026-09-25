@@ -69,6 +69,8 @@ type ProbeManager struct {
 	latencyAuthorities              func() []string
 	onProbeEvent                    func(kind string)
 	failureReporter                 *probeFailureReporter
+	probeStartMu                    sync.Mutex
+	nextProbeStart                  time.Time
 	periodicQueueFullEgress         atomic.Uint64
 	periodicQueueFullLatency        atomic.Uint64
 	periodicDuplicateEgress         atomic.Uint64
@@ -79,6 +81,9 @@ const (
 	egressTraceURL          = "https://cloudflare.com/cdn-cgi/trace"
 	egressTraceDomain       = "cloudflare.com"
 	defaultLatencyTestURL   = "https://www.gstatic.com/generate_204"
+	defaultProbeConcurrency = 16
+	periodicProbeBatchLimit = 128
+	probeStartInterval      = 100 * time.Millisecond
 	defaultQueueCap         = 1024
 	probeFailureInterval    = time.Minute
 	circuitRecoveryInterval = 5 * time.Minute
@@ -262,7 +267,7 @@ const (
 func NewProbeManager(cfg ProbeConfig) *ProbeManager {
 	conc := cfg.Concurrency
 	if conc <= 0 {
-		conc = 8
+		conc = defaultProbeConcurrency
 	}
 	queueCap := cfg.QueueCapacity
 	if queueCap <= 0 {
@@ -433,6 +438,9 @@ func (m *ProbeManager) ProbeEgressSync(hash node.Hash) (*EgressProbeResult, erro
 	if entry.Outbound.Load() == nil {
 		return nil, fmt.Errorf("node outbound not ready")
 	}
+	if !m.waitForProbeStart() {
+		return nil, fmt.Errorf("probe manager stopped")
+	}
 
 	// Record synchronous probe attempts for metrics parity with async paths.
 	if m.onProbeEvent != nil {
@@ -484,6 +492,9 @@ func (m *ProbeManager) ProbeLatencySync(hash node.Hash) (*LatencyProbeResult, er
 	if entry.Outbound.Load() == nil {
 		return nil, fmt.Errorf("node outbound not ready")
 	}
+	if !m.waitForProbeStart() {
+		return nil, fmt.Errorf("probe manager stopped")
+	}
 
 	testURL := m.currentLatencyTestURL()
 	domain := netutil.ExtractDomain(testURL)
@@ -519,8 +530,12 @@ func (m *ProbeManager) scanEgress() {
 	}
 	lookahead := 15 * time.Second
 	subLookup := m.pool.MakeSubLookup()
+	queued := 0
 
 	m.pool.Range(func(h node.Hash, entry *node.NodeEntry) bool {
+		if queued >= periodicProbeBatchLimit {
+			return false
+		}
 		// Check stop signal.
 		select {
 		case <-m.stopCh:
@@ -548,8 +563,11 @@ func (m *ProbeManager) scanEgress() {
 				}
 			}
 			switch m.enqueuePeriodicProbe(h, probeTaskKindEgress, probePriorityNormal) {
+			case probeEnqueueAccepted:
+				queued++
 			case probeEnqueueQueueFull:
 				m.periodicQueueFullEgress.Add(1)
+				return false
 			case probeEnqueueDuplicate:
 				m.periodicDuplicateEgress.Add(1)
 			}
@@ -565,8 +583,11 @@ func (m *ProbeManager) scanEgress() {
 		}
 
 		switch m.enqueuePeriodicProbe(h, probeTaskKindEgress, probePriorityNormal) {
+		case probeEnqueueAccepted:
+			queued++
 		case probeEnqueueQueueFull:
 			m.periodicQueueFullEgress.Add(1)
+			return false
 		case probeEnqueueDuplicate:
 			m.periodicDuplicateEgress.Add(1)
 		}
@@ -592,8 +613,12 @@ func (m *ProbeManager) scanLatency() {
 	if m.latencyAuthorities != nil {
 		authorities = m.latencyAuthorities()
 	}
+	queued := 0
 
 	m.pool.Range(func(h node.Hash, entry *node.NodeEntry) bool {
+		if queued >= periodicProbeBatchLimit {
+			return false
+		}
 		select {
 		case <-m.stopCh:
 			return false
@@ -619,8 +644,11 @@ func (m *ProbeManager) scanLatency() {
 		}
 
 		switch m.enqueuePeriodicProbe(h, probeTaskKindLatency, probePriorityNormal) {
+		case probeEnqueueAccepted:
+			queued++
 		case probeEnqueueQueueFull:
 			m.periodicQueueFullLatency.Add(1)
+			return false
 		case probeEnqueueDuplicate:
 			m.periodicDuplicateLatency.Add(1)
 		}
@@ -654,12 +682,41 @@ func (m *ProbeManager) executeTask(task probeTask) {
 	if entry.IsDisabledBySubscriptions(m.pool.MakeSubLookup()) {
 		return
 	}
+	if !m.waitForProbeStart() {
+		return
+	}
 
 	switch task.key.kind {
 	case probeTaskKindEgress:
 		m.probeEgress(task.key.hash, entry)
 	case probeTaskKindLatency:
 		m.probeLatency(task.key.hash, entry, m.currentLatencyTestURL())
+	}
+}
+
+// waitForProbeStart reserves the next probe start slot for async and sync
+// probes alike. A shared limiter bounds connection establishment across all
+// workers and immediate API-triggered probes.
+func (m *ProbeManager) waitForProbeStart() bool {
+	m.probeStartMu.Lock()
+	startAt := time.Now()
+	if m.nextProbeStart.After(startAt) {
+		startAt = m.nextProbeStart
+	}
+	m.nextProbeStart = startAt.Add(probeStartInterval)
+	delay := time.Until(startAt)
+	m.probeStartMu.Unlock()
+
+	if delay <= 0 {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-m.stopCh:
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

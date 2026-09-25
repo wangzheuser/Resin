@@ -63,6 +63,7 @@ func HTTPGetViaOutbound(
 		DisableKeepAlives: true,
 		ForceAttemptHTTP2: true,
 	}
+	defer transport.CloseIdleConnections()
 
 	client := &http.Client{
 		Transport: transport,

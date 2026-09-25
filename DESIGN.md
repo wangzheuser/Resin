@@ -2300,7 +2300,7 @@ GeoIP 与订阅的下载都有错误重试的需求。
 
 核心设置：
 * `RESIN_MAX_LATENCY_TABLE_ENTRIES`：每个节点延迟表中“普通站点 LRU 区”的最大表项数。默认 12，最大 32（超限启动失败）。
-* `RESIN_PROBE_CONCURRENCY`：节点探测的最大并发数量。默认 1000，最大 10000（超限启动失败）。
+* `RESIN_PROBE_CONCURRENCY`：节点探测的最大并发数量。默认 16，最大 10000（超限启动失败）。
 * `RESIN_GEOIP_UPDATE_SCHEDULE`：GeoIP 数据库自动更新的 Cron 表达式。默认 "0 7 * * *"。
 * `RESIN_DEFAULT_PLATFORM_STICKY_TTL`：默认平台粘性会话时长。默认 "168h"。
 * `RESIN_DEFAULT_PLATFORM_REGEX_FILTERS`：默认平台正则过滤器（JSON 字符串数组）。默认 `[]`。
