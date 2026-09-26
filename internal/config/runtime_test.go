@@ -15,6 +15,9 @@ func TestNewDefaultRuntimeConfig(t *testing.T) {
 	if cfg.MaxConsecutiveFailures != 3 {
 		t.Errorf("MaxConsecutiveFailures: got %d, want 3", cfg.MaxConsecutiveFailures)
 	}
+	if cfg.ReadyMinHealthyNodeRatio != 0.10 || cfg.ReadyMinHealthyEgressRatio != 0.20 {
+		t.Errorf("readiness defaults: got node=%v egress=%v, want node=0.1 egress=0.2", cfg.ReadyMinHealthyNodeRatio, cfg.ReadyMinHealthyEgressRatio)
+	}
 	if cfg.CacheFlushDirtyThreshold != 1000 {
 		t.Errorf("CacheFlushDirtyThreshold: got %d, want 1000", cfg.CacheFlushDirtyThreshold)
 	}
@@ -39,6 +42,9 @@ func TestRuntimeConfig_JSONRoundTrip(t *testing.T) {
 	// Spot-check key fields after round-trip
 	if decoded.MaxConsecutiveFailures != original.MaxConsecutiveFailures {
 		t.Errorf("MaxConsecutiveFailures: got %d, want %d", decoded.MaxConsecutiveFailures, original.MaxConsecutiveFailures)
+	}
+	if decoded.ReadyMinHealthyNodeRatio != original.ReadyMinHealthyNodeRatio || decoded.ReadyMinHealthyEgressRatio != original.ReadyMinHealthyEgressRatio {
+		t.Errorf("readiness ratios did not round-trip: got node=%v egress=%v", decoded.ReadyMinHealthyNodeRatio, decoded.ReadyMinHealthyEgressRatio)
 	}
 }
 
@@ -96,6 +102,8 @@ func TestRuntimeConfig_JSONFieldNames(t *testing.T) {
 		"reverse_proxy_log_resp_headers_max_bytes",
 		"reverse_proxy_log_resp_body_max_bytes",
 		"max_consecutive_failures",
+		"ready_min_healthy_node_ratio",
+		"ready_min_healthy_egress_ratio",
 		"max_latency_test_interval",
 		"max_authority_latency_test_interval",
 		"max_egress_test_interval",

@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"math"
 	"net/netip"
 	"path/filepath"
 	"reflect"
@@ -175,6 +176,21 @@ func TestValidateRuntimeConfig_ValidConfig(t *testing.T) {
 	cfg := newDefaultCfg()
 	if err := validateRuntimeConfig(cfg); err != nil {
 		t.Errorf("unexpected error for valid config: %v", err)
+	}
+}
+
+func TestValidateRuntimeConfig_InvalidReadinessRatios(t *testing.T) {
+	for _, value := range []float64{0, -0.1, 1.01, math.NaN(), math.Inf(1)} {
+		cfg := config.NewDefaultRuntimeConfig()
+		cfg.ReadyMinHealthyNodeRatio = value
+		if err := validateRuntimeConfig(cfg); err == nil {
+			t.Fatalf("node ratio %v should be rejected", value)
+		}
+		cfg = config.NewDefaultRuntimeConfig()
+		cfg.ReadyMinHealthyEgressRatio = value
+		if err := validateRuntimeConfig(cfg); err == nil {
+			t.Fatalf("egress ratio %v should be rejected", value)
+		}
 	}
 }
 

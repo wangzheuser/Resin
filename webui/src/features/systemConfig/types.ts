@@ -6,6 +6,8 @@ export type RuntimeConfig = {
   reverse_proxy_log_resp_headers_max_bytes: number;
   reverse_proxy_log_resp_body_max_bytes: number;
   max_consecutive_failures: number;
+  ready_min_healthy_node_ratio: number;
+  ready_min_healthy_egress_ratio: number;
   max_latency_test_interval: string;
   max_authority_latency_test_interval: string;
   max_egress_test_interval: string;

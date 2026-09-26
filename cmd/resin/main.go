@@ -115,6 +115,7 @@ func loadRuntimeConfig(engine *state.StateEngine) *config.RuntimeConfig {
 		log.Println("No persisted runtime config found, using defaults")
 		return config.NewDefaultRuntimeConfig()
 	}
+	config.NormalizeRuntimeConfig(runtimeCfg)
 	log.Printf("Loaded persisted runtime config (version %d)", ver)
 	return runtimeCfg
 }

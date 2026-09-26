@@ -15,6 +15,8 @@ type RuntimeConfig struct {
 
 	// Health check
 	MaxConsecutiveFailures          int      `json:"max_consecutive_failures"`
+	ReadyMinHealthyNodeRatio        float64  `json:"ready_min_healthy_node_ratio"`
+	ReadyMinHealthyEgressRatio      float64  `json:"ready_min_healthy_egress_ratio"`
 	MaxLatencyTestInterval          Duration `json:"max_latency_test_interval"`
 	MaxAuthorityLatencyTestInterval Duration `json:"max_authority_latency_test_interval"`
 	MaxEgressTestInterval           Duration `json:"max_egress_test_interval"`
@@ -44,6 +46,8 @@ func NewDefaultRuntimeConfig() *RuntimeConfig {
 		ReverseProxyLogRespBodyMaxBytes:    1024,
 
 		MaxConsecutiveFailures:          3,
+		ReadyMinHealthyNodeRatio:        0.10,
+		ReadyMinHealthyEgressRatio:      0.20,
 		MaxLatencyTestInterval:          Duration(1 * time.Hour),
 		MaxAuthorityLatencyTestInterval: Duration(3 * time.Hour),
 		MaxEgressTestInterval:           Duration(24 * time.Hour),
@@ -57,4 +61,20 @@ func NewDefaultRuntimeConfig() *RuntimeConfig {
 		CacheFlushInterval:       Duration(5 * time.Minute),
 		CacheFlushDirtyThreshold: 1000,
 	}
+}
+
+// NormalizeRuntimeConfig fills fields introduced after the initial persisted
+// schema so older config rows continue to use safe defaults.
+func NormalizeRuntimeConfig(cfg *RuntimeConfig) *RuntimeConfig {
+	if cfg == nil {
+		return NewDefaultRuntimeConfig()
+	}
+	defaults := NewDefaultRuntimeConfig()
+	if cfg.ReadyMinHealthyNodeRatio <= 0 {
+		cfg.ReadyMinHealthyNodeRatio = defaults.ReadyMinHealthyNodeRatio
+	}
+	if cfg.ReadyMinHealthyEgressRatio <= 0 {
+		cfg.ReadyMinHealthyEgressRatio = defaults.ReadyMinHealthyEgressRatio
+	}
+	return cfg
 }

@@ -22,6 +22,8 @@ type RuntimeConfigForm = {
   reverse_proxy_log_resp_headers_max_bytes: string;
   reverse_proxy_log_resp_body_max_bytes: string;
   max_consecutive_failures: string;
+  ready_min_healthy_node_ratio: string;
+  ready_min_healthy_egress_ratio: string;
   max_latency_test_interval: string;
   max_authority_latency_test_interval: string;
   max_egress_test_interval: string;
@@ -41,6 +43,8 @@ const EDITABLE_FIELDS: Array<keyof RuntimeConfig> = [
   "reverse_proxy_log_resp_headers_max_bytes",
   "reverse_proxy_log_resp_body_max_bytes",
   "max_consecutive_failures",
+  "ready_min_healthy_node_ratio",
+  "ready_min_healthy_egress_ratio",
   "max_latency_test_interval",
   "max_authority_latency_test_interval",
   "max_egress_test_interval",
@@ -60,6 +64,8 @@ const FIELD_LABELS: Record<keyof RuntimeConfig, string> = {
   reverse_proxy_log_resp_headers_max_bytes: "响应头最大字节数",
   reverse_proxy_log_resp_body_max_bytes: "响应体最大字节数",
   max_consecutive_failures: "最大连续失败次数",
+  ready_min_healthy_node_ratio: "最小健康节点比例",
+  ready_min_healthy_egress_ratio: "最小健康出口 IP 比例",
   max_latency_test_interval: "节点延迟最大测试间隔",
   max_authority_latency_test_interval: "权威域名最大测试间隔",
   max_egress_test_interval: "出口 IP 更新检查间隔",
@@ -97,6 +103,8 @@ function configToForm(config: RuntimeConfig): RuntimeConfigForm {
     reverse_proxy_log_resp_headers_max_bytes: String(config.reverse_proxy_log_resp_headers_max_bytes),
     reverse_proxy_log_resp_body_max_bytes: String(config.reverse_proxy_log_resp_body_max_bytes),
     max_consecutive_failures: String(config.max_consecutive_failures),
+    ready_min_healthy_node_ratio: String(config.ready_min_healthy_node_ratio),
+    ready_min_healthy_egress_ratio: String(config.ready_min_healthy_egress_ratio),
     max_latency_test_interval: config.max_latency_test_interval,
     max_authority_latency_test_interval: config.max_authority_latency_test_interval,
     max_egress_test_interval: config.max_egress_test_interval,
@@ -123,6 +131,14 @@ function parseNonNegativeInt(field: string, raw: string): number {
     throw new Error(i18next.t("{{field}} 必须是非负整数", { field: requiredFieldLabel(field) }));
   }
   return parsed;
+}
+
+function parseReadyRatio(field: string, raw: string): number {
+  const value = Number(raw.trim());
+  if (!Number.isFinite(value) || value <= 0 || value > 1) {
+    throw new Error(i18next.t("{{field}} 必须大于 0 且不超过 1", { field: requiredFieldLabel(field) }));
+  }
+  return value;
 }
 
 function parseDurationField(field: string, raw: string): string {
@@ -168,6 +184,8 @@ function parseForm(form: RuntimeConfigForm): RuntimeConfig {
       form.reverse_proxy_log_resp_body_max_bytes,
     ),
     max_consecutive_failures: parseNonNegativeInt("最大连续失败次数", form.max_consecutive_failures),
+    ready_min_healthy_node_ratio: parseReadyRatio("最小健康节点比例", form.ready_min_healthy_node_ratio),
+    ready_min_healthy_egress_ratio: parseReadyRatio("最小健康出口 IP 比例", form.ready_min_healthy_egress_ratio),
     max_latency_test_interval: parseDurationField("节点延迟最大测试间隔", form.max_latency_test_interval),
     max_authority_latency_test_interval: parseDurationField(
       "权威域名最大测试间隔",
@@ -474,6 +492,42 @@ export function SystemConfigPage() {
                       value={form.max_consecutive_failures}
                       onChange={(event) => setFormField("max_consecutive_failures", event.target.value)}
                     />
+                  </div>
+                  <div className="field-group">
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <label className="field-label" htmlFor="sys-ready-node-ratio" style={{ margin: 0 }}>
+                        {t("最小健康节点比例")}
+                      </label>
+                      {renderRestoreButton("ready_min_healthy_node_ratio")}
+                    </div>
+                    <Input
+                      id="sys-ready-node-ratio"
+                      type="number"
+                      min={0.01}
+                      max={1}
+                      step={0.01}
+                      value={form.ready_min_healthy_node_ratio}
+                      onChange={(event) => setFormField("ready_min_healthy_node_ratio", event.target.value)}
+                    />
+                    <span className="field-hint">{t("范围：0 到 1，保存后实时影响 /readyz")}</span>
+                  </div>
+                  <div className="field-group">
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <label className="field-label" htmlFor="sys-ready-egress-ratio" style={{ margin: 0 }}>
+                        {t("最小健康出口 IP 比例")}
+                      </label>
+                      {renderRestoreButton("ready_min_healthy_egress_ratio")}
+                    </div>
+                    <Input
+                      id="sys-ready-egress-ratio"
+                      type="number"
+                      min={0.01}
+                      max={1}
+                      step={0.01}
+                      value={form.ready_min_healthy_egress_ratio}
+                      onChange={(event) => setFormField("ready_min_healthy_egress_ratio", event.target.value)}
+                    />
+                    <span className="field-hint">{t("范围：0 到 1，保存后实时影响 /readyz")}</span>
                   </div>
                 </div>
               </section>

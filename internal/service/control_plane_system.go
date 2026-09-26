@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -81,6 +82,8 @@ var runtimeConfigAllowedFields = map[string]bool{
 	"reverse_proxy_log_resp_headers_max_bytes": true,
 	"reverse_proxy_log_resp_body_max_bytes":    true,
 	"max_consecutive_failures":                 true,
+	"ready_min_healthy_node_ratio":             true,
+	"ready_min_healthy_egress_ratio":           true,
 	"max_latency_test_interval":                true,
 	"max_authority_latency_test_interval":      true,
 	"max_egress_test_interval":                 true,
@@ -204,6 +207,12 @@ func validateRuntimeConfig(cfg *config.RuntimeConfig) *ServiceError {
 	if cfg.MaxConsecutiveFailures < 0 {
 		return invalidArg("max_consecutive_failures: must be non-negative")
 	}
+	if !isValidReadyRatio(cfg.ReadyMinHealthyNodeRatio) {
+		return invalidArg("ready_min_healthy_node_ratio: must be a finite number in (0, 1]")
+	}
+	if !isValidReadyRatio(cfg.ReadyMinHealthyEgressRatio) {
+		return invalidArg("ready_min_healthy_egress_ratio: must be a finite number in (0, 1]")
+	}
 	if cfg.CacheFlushDirtyThreshold < 0 {
 		return invalidArg("cache_flush_dirty_threshold: must be non-negative")
 	}
@@ -257,4 +266,8 @@ func validateRuntimeConfig(cfg *config.RuntimeConfig) *ServiceError {
 		}
 	}
 	return nil
+}
+
+func isValidReadyRatio(value float64) bool {
+	return value > 0 && value <= 1 && !math.IsNaN(value) && !math.IsInf(value, 0)
 }
