@@ -35,12 +35,22 @@ type Router struct {
 	p2cWindow       func() time.Duration
 	onLeaseEvent    LeaseEventFunc
 	nodeTagResolver func(node.Hash) string
+	maxStickyLeases int
 }
+
+// A caller that generates a fresh account ID for every request should not be
+// able to grow one sticky-lease map without bound. Once this many distinct
+// accounts are active for a platform, new accounts fall back to random routing
+// until old leases expire or are reused.
+const defaultMaxStickyLeasesPerPlatform = 8192
 
 type RouterConfig struct {
 	Pool        PoolAccessor
 	Authorities func() []string
 	P2CWindow   func() time.Duration
+	// MaxStickyLeasesPerPlatform bounds distinct sticky accounts. A non-positive
+	// value uses the production default.
+	MaxStickyLeasesPerPlatform int
 	// OnLeaseEvent is called synchronously; handlers must stay lightweight.
 	OnLeaseEvent LeaseEventFunc
 	// NodeTagResolver resolves a node hash to its display tag ("<Sub>/<Tag>").
@@ -49,6 +59,10 @@ type RouterConfig struct {
 }
 
 func NewRouter(cfg RouterConfig) *Router {
+	maxStickyLeases := cfg.MaxStickyLeasesPerPlatform
+	if maxStickyLeases <= 0 {
+		maxStickyLeases = defaultMaxStickyLeasesPerPlatform
+	}
 	return &Router{
 		pool:            cfg.Pool,
 		states:          xsync.NewMap[string, *PlatformRoutingState](),
@@ -57,6 +71,7 @@ func NewRouter(cfg RouterConfig) *Router {
 		p2cWindow:       cfg.P2CWindow,
 		onLeaseEvent:    cfg.OnLeaseEvent,
 		nodeTagResolver: cfg.NodeTagResolver,
+		maxStickyLeases: maxStickyLeases,
 	}
 }
 
@@ -112,7 +127,7 @@ func (r *Router) routeRequest(
 		effectiveExcluded[failedEgress] = struct{}{}
 	}
 	var result RouteResult
-	if account == "" {
+	if account == "" || r.shouldBypassNewStickyLease(state, account) {
 		result, err = r.routeRandom(plat, state, targetDomain, effectiveExcluded)
 	} else {
 		result, err = r.routeSticky(
@@ -135,6 +150,16 @@ func (r *Router) routeRequest(
 		result.NodeTag = r.nodeTagResolver(result.NodeHash)
 	}
 	return result, nil
+}
+
+func (r *Router) shouldBypassNewStickyLease(state *PlatformRoutingState, account string) bool {
+	if r == nil || state == nil || account == "" || r.maxStickyLeases <= 0 {
+		return false
+	}
+	if _, exists := state.Leases.GetLease(account); exists {
+		return false
+	}
+	return state.Leases.Size() >= r.maxStickyLeases
 }
 
 func withPlatformContext(plat *platform.Platform, res RouteResult) RouteResult {

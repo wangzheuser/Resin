@@ -22,6 +22,7 @@ const inboundDemuxSniffTimeout = 15 * time.Second
 const (
 	inboundDemuxAcceptRetryMinDelay = 5 * time.Millisecond
 	inboundDemuxAcceptRetryMaxDelay = time.Second
+	inboundDemuxMaxActiveConns      = 4096
 )
 
 type inboundDemuxServer struct {
@@ -29,14 +30,16 @@ type inboundDemuxServer struct {
 	httpListener *connChannelListener
 	socksHandler inboundConnHandler
 
-	mu           sync.Mutex
-	outer        net.Listener
-	shuttingDown bool
-	activeConns  map[net.Conn]struct{}
-	sniffConns   map[net.Conn]struct{}
-	workerWG     sync.WaitGroup
-	baseCtx      context.Context
-	cancelBase   context.CancelFunc
+	mu             sync.Mutex
+	outer          net.Listener
+	shuttingDown   bool
+	activeConns    map[net.Conn]struct{}
+	sniffConns     map[net.Conn]struct{}
+	workerWG       sync.WaitGroup
+	activeWorkers  int
+	maxActiveConns int
+	baseCtx        context.Context
+	cancelBase     context.CancelFunc
 }
 
 func newInboundDemuxServer(httpServer *http.Server, socksHandler inboundConnHandler) *inboundDemuxServer {
@@ -44,11 +47,20 @@ func newInboundDemuxServer(httpServer *http.Server, socksHandler inboundConnHand
 		httpServer = &http.Server{Handler: http.NotFoundHandler()}
 	}
 	return &inboundDemuxServer{
-		httpServer:   httpServer,
-		httpListener: newConnChannelListener(),
-		socksHandler: socksHandler,
-		activeConns:  make(map[net.Conn]struct{}),
-		sniffConns:   make(map[net.Conn]struct{}),
+		httpServer:     httpServer,
+		httpListener:   newConnChannelListener(),
+		socksHandler:   socksHandler,
+		activeConns:    make(map[net.Conn]struct{}),
+		sniffConns:     make(map[net.Conn]struct{}),
+		maxActiveConns: inboundDemuxMaxActiveConns,
+	}
+}
+
+func (s *inboundDemuxServer) SetMaxActiveConns(limit int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit > 0 {
+		s.maxActiveConns = limit
 	}
 }
 
@@ -158,7 +170,12 @@ func (s *inboundDemuxServer) Shutdown(ctx context.Context) error {
 }
 
 func (s *inboundDemuxServer) handleAcceptedConn(conn net.Conn) {
-	defer s.workerWG.Done()
+	defer func() {
+		s.mu.Lock()
+		s.activeWorkers--
+		s.mu.Unlock()
+		s.workerWG.Done()
+	}()
 	s.trackActiveConn(conn)
 	s.trackSniffConn(conn)
 
@@ -226,9 +243,16 @@ func (s *inboundDemuxServer) tryStartConnWorker() bool {
 	if s.shuttingDown {
 		return false
 	}
+	// activeWorkers covers connections still in protocol sniffing; activeConns
+	// covers connections handed to HTTP/SOCKS handlers. Count both so hijacked
+	// CONNECT tunnels remain subject to the admission limit after sniffing ends.
+	if s.maxActiveConns > 0 && s.activeWorkers+len(s.activeConns) >= s.maxActiveConns {
+		return false
+	}
 	// Registering the worker while holding mu keeps new Add(1) calls serialized
 	// with Shutdown() transitioning into workerWG.Wait().
 	s.workerWG.Add(1)
+	s.activeWorkers++
 	return true
 }
 

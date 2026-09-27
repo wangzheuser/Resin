@@ -205,3 +205,62 @@ func TestPumpPreparedTunnelReader_ClientReadResetAfterIngressDoesNotFail(t *test
 		t.Fatal("expected upstream side to finish")
 	}
 }
+
+func TestPumpPreparedTunnelReader_ClosesIdleTunnel(t *testing.T) {
+	clientConn, clientPeer := net.Pipe()
+	upstreamConn, upstreamPeer := net.Pipe()
+	defer clientPeer.Close()
+	defer upstreamPeer.Close()
+
+	resultCh := make(chan tunnelRelayResult, 1)
+	go func() {
+		resultCh <- pumpPreparedTunnelReader(clientConn, clientConn, &preparedTunnel{
+			upstreamConn: upstreamConn,
+			recordResult: func(bool, string, bool) {},
+		}, tunnelPumpOptions{idleTimeout: 20 * time.Millisecond, maxLifetime: time.Second})
+	}()
+
+	select {
+	case result := <-resultCh:
+		if result.upstreamStage != "connect_idle_timeout" {
+			t.Fatalf("upstream stage: got %q, want connect_idle_timeout", result.upstreamStage)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("idle tunnel was not closed")
+	}
+}
+
+func TestPumpPreparedTunnelReader_TrafficResetsIdleTimeout(t *testing.T) {
+	clientConn, clientPeer := net.Pipe()
+	upstreamConn, upstreamPeer := net.Pipe()
+	defer clientPeer.Close()
+	defer upstreamPeer.Close()
+
+	resultCh := make(chan tunnelRelayResult, 1)
+	go func() {
+		resultCh <- pumpPreparedTunnelReader(clientConn, clientConn, &preparedTunnel{
+			upstreamConn: upstreamConn,
+			recordResult: func(bool, string, bool) {},
+		}, tunnelPumpOptions{idleTimeout: 100 * time.Millisecond, maxLifetime: 180 * time.Millisecond})
+	}()
+
+	for i := 0; i < 3; i++ {
+		go func() {
+			_, _ = clientPeer.Write([]byte("x"))
+		}()
+		buf := make([]byte, 1)
+		if _, err := io.ReadFull(upstreamPeer, buf); err != nil {
+			t.Fatalf("read forwarded traffic: %v", err)
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+
+	select {
+	case result := <-resultCh:
+		if result.upstreamStage != "connect_max_lifetime" {
+			t.Fatalf("upstream stage: got %q, want connect_max_lifetime", result.upstreamStage)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("max lifetime did not close tunnel")
+	}
+}

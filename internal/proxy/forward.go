@@ -9,6 +9,7 @@ import (
 	"net/http/httptrace"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/netutil"
@@ -18,18 +19,20 @@ import (
 
 // ForwardProxyConfig holds dependencies for the forward proxy.
 type ForwardProxyConfig struct {
-	ProxyToken        string
-	AuthVersion       string
-	FixedPlatformName string
-	FixedAccount      string
-	Router            *routing.Router
-	Pool              outbound.PoolAccessor
-	Health            HealthRecorder
-	Events            EventEmitter
-	MetricsSink       MetricsEventSink
-	OutboundTransport OutboundTransportConfig
-	TransportPool     *OutboundTransportPool
-	ProxyBypassRules  []string
+	ProxyToken         string
+	AuthVersion        string
+	FixedPlatformName  string
+	FixedAccount       string
+	Router             *routing.Router
+	Pool               outbound.PoolAccessor
+	Health             HealthRecorder
+	Events             EventEmitter
+	MetricsSink        MetricsEventSink
+	OutboundTransport  OutboundTransportConfig
+	TransportPool      *OutboundTransportPool
+	ProxyBypassRules   []string
+	ConnectIdleTimeout time.Duration
+	ConnectMaxLifetime time.Duration
 }
 
 // ForwardProxy implements an HTTP forward proxy with Proxy-Authorization
@@ -46,6 +49,7 @@ type ForwardProxy struct {
 	metricsSink       MetricsEventSink
 	transportConfig   OutboundTransportConfig
 	transportPool     *OutboundTransportPool
+	tunnelOpts        tunnelPumpOptions
 	transportPoolOnce sync.Once
 	directTransport   *http.Transport
 	directOnce        sync.Once
@@ -79,7 +83,11 @@ func NewForwardProxy(cfg ForwardProxyConfig) *ForwardProxy {
 		metricsSink:       cfg.MetricsSink,
 		transportConfig:   transportCfg,
 		transportPool:     transportPool,
-		bypass:            NewTargetBypassMatcher(cfg.ProxyBypassRules),
+		tunnelOpts: normalizeTunnelPumpOptions(tunnelPumpOptions{
+			idleTimeout: cfg.ConnectIdleTimeout,
+			maxLifetime: cfg.ConnectMaxLifetime,
+		}),
+		bypass: NewTargetBypassMatcher(cfg.ProxyBypassRules),
 	}
 }
 
@@ -515,6 +523,8 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 	lifecycle.setHTTPStatus(http.StatusOK)
 	relay := pumpPreparedTunnel(clientConn, clientBuf.Reader, prepare.session, tunnelPumpOptions{
 		requireBidirectionalTraffic: true,
+		idleTimeout:                 p.tunnelOpts.idleTimeout,
+		maxLifetime:                 p.tunnelOpts.maxLifetime,
 	})
 	lifecycle.addIngressBytes(relay.ingressBytes)
 	lifecycle.addEgressBytes(relay.egressBytes)

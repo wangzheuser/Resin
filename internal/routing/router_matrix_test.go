@@ -76,6 +76,36 @@ func TestRouteRequest_DefaultPlatformRequiresWellKnownID(t *testing.T) {
 	}
 }
 
+func TestRouteRequest_StickyLeaseCapFallsBackToRandomForNewAccounts(t *testing.T) {
+	pool := newRouterTestPool()
+	plat := platform.NewPlatform("plat-cap", "Plat-Cap", nil, nil)
+	plat.StickyTTLNs = int64(time.Hour)
+	pool.addPlatform(plat)
+
+	hash, entry := newRoutableEntry(t, `{"id":"sticky-cap"}`, "203.0.113.11")
+	pool.addEntry(hash, entry)
+	pool.rebuildPlatformView(plat)
+
+	router := NewRouter(RouterConfig{
+		Pool:                       pool,
+		Authorities:                func() []string { return []string{"cloudflare.com"} },
+		P2CWindow:                  func() time.Duration { return time.Minute },
+		MaxStickyLeasesPerPlatform: 1,
+	})
+	if _, err := router.RouteRequest("Plat-Cap", "first", "https://example.com"); err != nil {
+		t.Fatalf("first sticky route: %v", err)
+	}
+	if got := router.ensurePlatformState(plat.ID).Leases.Size(); got != 1 {
+		t.Fatalf("lease count after first account: got %d, want 1", got)
+	}
+	if _, err := router.RouteRequest("Plat-Cap", "second", "https://example.com"); err != nil {
+		t.Fatalf("capped route: %v", err)
+	}
+	if _, ok := router.ensurePlatformState(plat.ID).Leases.GetLease("second"); ok {
+		t.Fatal("new account should fall back to random routing when lease cap is reached")
+	}
+}
+
 func TestRouteRequest_EmptyAccountStaleViewReturnsError(t *testing.T) {
 	pool := newRouterTestPool()
 	plat := platform.NewPlatform("plat-stale", "Plat-Stale", nil, nil)

@@ -290,8 +290,8 @@ func newTopologyRuntime(
 	probeMgr = probe.NewProbeManager(probe.ProbeConfig{
 		Pool:        pool,
 		Concurrency: envCfg.ProbeConcurrency,
-		Fetcher: func(hash node.Hash, url string) ([]byte, time.Duration, error) {
-			ctx, cancel := context.WithTimeout(context.Background(), envCfg.ProbeTimeout)
+		ContextFetcher: func(parent context.Context, hash node.Hash, url string) ([]byte, time.Duration, error) {
+			ctx, cancel := context.WithTimeout(parent, envCfg.ProbeTimeout)
 			defer cancel()
 			entry, ok := pool.GetEntry(hash)
 			if !ok {
@@ -331,7 +331,13 @@ func newTopologyRuntime(
 		engine.MarkNodeStatic(hash.Hex())
 		outboundMgr.EnsureNodeOutbound(hash)
 		// No NotifyNodeDirty here — AddNodeFromSub already notifies all platforms.
-		probeMgr.TriggerImmediateEgressProbe(hash)
+		// Do not start a probe for every node while a subscription is being
+		// loaded. A large refresh can add tens of thousands of nodes at once;
+		// putting one immediate task per node creates a connection burst and
+		// leaves the periodic scanner fighting a long duplicate queue. The
+		// scanner runs shortly after startup and applies the same health policy
+		// with bounded batches. Explicit/manual probes and re-enabled nodes still
+		// use the immediate path below.
 	})
 	pool.SetOnNodeRemoved(func(hash node.Hash, entry *node.NodeEntry) {
 		markNodeRemovedDirty(engine, hash, entry)

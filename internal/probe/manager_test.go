@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -816,6 +817,47 @@ func TestProbeManager_StopWaitsImmediateProbe(t *testing.T) {
 	}
 }
 
+func TestProbeManager_StopCancelsContextFetcher(t *testing.T) {
+	p := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+	hash := node.HashFromRawOptions([]byte(`{"type":"stop-context"}`))
+	p.AddNodeFromSub(hash, []byte(`{"type":"stop-context"}`), "sub1")
+	entry, ok := p.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	storeOutbound(entry)
+	started := make(chan struct{})
+	mgr := NewProbeManager(ProbeConfig{
+		Pool:        p,
+		Concurrency: 1,
+		ContextFetcher: func(ctx context.Context, _ node.Hash, _ string) ([]byte, time.Duration, error) {
+			close(started)
+			<-ctx.Done()
+			return nil, 0, ctx.Err()
+		},
+	})
+	mgr.Start()
+	mgr.TriggerImmediateEgressProbe(hash)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("context probe did not start")
+	}
+	stopDone := make(chan struct{})
+	go func() {
+		mgr.Stop()
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not cancel context fetcher")
+	}
+}
+
 func TestProbeQueue_DequeueChoosesNormalWhenSelectorRequests(t *testing.T) {
 	pool := topology.NewGlobalNodePool(topology.PoolConfig{
 		MaxLatencyTableEntries: 16,
@@ -976,7 +1018,7 @@ func TestPeriodicScansCapBatchSize(t *testing.T) {
 				MaxLatencyTableEntries: 16,
 				MaxConsecutiveFailures: func() int { return 3 },
 			})
-			for i := 0; i < periodicProbeBatchLimit+32; i++ {
+			for i := 0; i < defaultProbeConcurrency+32; i++ {
 				hash := node.HashFromRawOptions([]byte(fmt.Sprintf(`{"type":"batch-%d"}`, i)))
 				pool.AddNodeFromSub(hash, []byte(fmt.Sprintf(`{"type":"batch-%d"}`, i)), "sub1")
 				entry, ok := pool.GetEntry(hash)
@@ -991,6 +1033,7 @@ func TestPeriodicScansCapBatchSize(t *testing.T) {
 
 			mgr := NewProbeManager(ProbeConfig{Pool: pool, Concurrency: 1})
 			defer mgr.Stop()
+			batchLimit := mgr.periodicBatchLimit()
 			if kind == probeTaskKindEgress {
 				mgr.scanEgress()
 			} else {
@@ -1000,8 +1043,8 @@ func TestPeriodicScansCapBatchSize(t *testing.T) {
 			mgr.taskQueue.mu.Lock()
 			got := mgr.taskQueue.high.len() + mgr.taskQueue.normal.len()
 			mgr.taskQueue.mu.Unlock()
-			if got != periodicProbeBatchLimit {
-				t.Fatalf("queued probes = %d, want %d", got, periodicProbeBatchLimit)
+			if got != batchLimit {
+				t.Fatalf("queued probes = %d, want %d", got, batchLimit)
 			}
 		})
 	}

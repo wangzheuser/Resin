@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Resinat/Resin/internal/netutil"
@@ -54,6 +55,70 @@ type tunnelRelayResult struct {
 
 type tunnelPumpOptions struct {
 	requireBidirectionalTraffic bool
+	idleTimeout                 time.Duration
+	maxLifetime                 time.Duration
+}
+
+const (
+	defaultTunnelIdleTimeout = time.Minute
+	defaultTunnelMaxLifetime = 30 * time.Minute
+)
+
+func normalizeTunnelPumpOptions(opts tunnelPumpOptions) tunnelPumpOptions {
+	if opts.idleTimeout <= 0 {
+		opts.idleTimeout = defaultTunnelIdleTimeout
+	}
+	if opts.maxLifetime <= 0 {
+		opts.maxLifetime = defaultTunnelMaxLifetime
+	}
+	return opts
+}
+
+type tunnelActivityConn struct {
+	net.Conn
+	lastActivity *atomic.Int64
+}
+
+func newTunnelActivityConn(conn net.Conn, activity *atomic.Int64) *tunnelActivityConn {
+	c := &tunnelActivityConn{Conn: conn, lastActivity: activity}
+	return c
+}
+
+func (c *tunnelActivityConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.lastActivity.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+func (c *tunnelActivityConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if n > 0 {
+		c.lastActivity.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+func (c *tunnelActivityConn) CloseWrite() error {
+	return closeWriteErr(c.Conn)
+}
+
+func (c *tunnelActivityConn) CloseRead() error {
+	return closeReadErr(c.Conn)
+}
+
+type tunnelActivityReader struct {
+	io.Reader
+	lastActivity *atomic.Int64
+}
+
+func (r tunnelActivityReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if n > 0 {
+		r.lastActivity.Store(time.Now().UnixNano())
+	}
+	return n, err
 }
 
 func prepareConnectTunnel(
@@ -286,6 +351,7 @@ func pumpPreparedTunnelReader(
 	if clientConn == nil || clientToUpstream == nil || session == nil || session.upstreamConn == nil {
 		return tunnelRelayResult{}
 	}
+	opts = normalizeTunnelPumpOptions(opts)
 
 	type copyResult struct {
 		n   int64
@@ -298,18 +364,59 @@ func pumpPreparedTunnelReader(
 			_ = session.upstreamConn.Close()
 		})
 	}
+	now := time.Now()
+	var activity atomic.Int64
+	activity.Store(now.UnixNano())
+	clientActivity := newTunnelActivityConn(clientConn, &activity)
+	upstreamActivity := newTunnelActivityConn(session.upstreamConn, &activity)
+	clientReader := tunnelActivityReader{Reader: clientToUpstream, lastActivity: clientActivity.lastActivity}
+	// Both sides share one activity timestamp so traffic in either direction
+	// keeps the tunnel alive.
+	lastActivity := &activity
+	watchdogDone := make(chan struct{})
+	timeoutCh := make(chan string, 1)
+	var watchdogWG sync.WaitGroup
+	watchdogWG.Add(1)
+	go func() {
+		defer watchdogWG.Done()
+		interval := opts.idleTimeout / 2
+		if interval < 100*time.Millisecond {
+			interval = 100 * time.Millisecond
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		startedAt := now
+		for {
+			select {
+			case <-watchdogDone:
+				return
+			case current := <-ticker.C:
+				last := time.Unix(0, lastActivity.Load())
+				if current.Sub(startedAt) >= opts.maxLifetime {
+					closeBoth()
+					timeoutCh <- "connect_max_lifetime"
+					return
+				}
+				if current.Sub(last) >= opts.idleTimeout {
+					closeBoth()
+					timeoutCh <- "connect_idle_timeout"
+					return
+				}
+			}
+		}
+	}()
 	ingressBytesCh := make(chan copyResult, 1)
 	egressBytesCh := make(chan copyResult, 1)
 	go func() {
-		n, copyErr := io.Copy(session.upstreamConn, clientToUpstream)
-		if !isBenignTunnelCopyError(copyErr) || !closeWriteConn(session.upstreamConn) {
+		n, copyErr := io.Copy(upstreamActivity, clientReader)
+		if !isBenignTunnelCopyError(copyErr) || !closeWriteConn(upstreamActivity) {
 			closeBoth()
 		}
 		egressBytesCh <- copyResult{n: n, err: copyErr}
 	}()
 	go func() {
-		n, copyErr := io.Copy(clientConn, session.upstreamConn)
-		if !isBenignTunnelCopyError(copyErr) || !closeWriteConn(clientConn) {
+		n, copyErr := io.Copy(clientActivity, upstreamActivity)
+		if !isBenignTunnelCopyError(copyErr) || !closeWriteConn(clientActivity) {
 			closeBoth()
 		}
 		ingressBytesCh <- copyResult{n: n, err: copyErr}
@@ -317,6 +424,8 @@ func pumpPreparedTunnelReader(
 
 	ingressResult := <-ingressBytesCh
 	egressResult := <-egressBytesCh
+	close(watchdogDone)
+	watchdogWG.Wait()
 	closeBoth()
 
 	ingressErrBenign := isBenignTunnelCopyError(ingressResult.err)
@@ -332,6 +441,14 @@ func pumpPreparedTunnelReader(
 		ingressBytes: ingressResult.n,
 		egressBytes:  egressResult.n,
 		netOK:        true,
+	}
+	select {
+	case timeoutStage := <-timeoutCh:
+		result.netOK = false
+		result.proxyErr = ErrUpstreamRequestFailed
+		result.upstreamStage = timeoutStage
+		result.upstreamErr = context.DeadlineExceeded
+	default:
 	}
 	switch {
 	case !ingressErrBenign:

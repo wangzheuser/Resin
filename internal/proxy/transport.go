@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Resinat/Resin/internal/node"
@@ -16,12 +17,16 @@ type OutboundTransportConfig struct {
 	MaxIdleConns        int
 	MaxIdleConnsPerHost int
 	IdleConnTimeout     time.Duration
+	// MaxTransports bounds the number of per-node HTTP transports retained in
+	// the shared pool. Per-transport idle limits are not process-wide caps.
+	MaxTransports int
 }
 
 const (
 	defaultTransportMaxIdleConns        = 1024
 	defaultTransportMaxIdleConnsPerHost = 64
 	defaultTransportIdleConnTimeout     = 90 * time.Second
+	defaultTransportMaxTransports       = 256
 )
 
 func normalizeOutboundTransportConfig(cfg OutboundTransportConfig) OutboundTransportConfig {
@@ -34,6 +39,9 @@ func normalizeOutboundTransportConfig(cfg OutboundTransportConfig) OutboundTrans
 	if cfg.IdleConnTimeout <= 0 {
 		cfg.IdleConnTimeout = defaultTransportIdleConnTimeout
 	}
+	if cfg.MaxTransports <= 0 {
+		cfg.MaxTransports = defaultTransportMaxTransports
+	}
 	return cfg
 }
 
@@ -43,6 +51,13 @@ func normalizeOutboundTransportConfig(cfg OutboundTransportConfig) OutboundTrans
 type OutboundTransportPool struct {
 	config     OutboundTransportConfig
 	transports *xsync.Map[node.Hash, *http.Transport]
+	mu         sync.Mutex
+	order      []transportEntry
+}
+
+type transportEntry struct {
+	hash      node.Hash
+	transport *http.Transport
 }
 
 func newOutboundTransportPool() *OutboundTransportPool {
@@ -67,15 +82,37 @@ func (p *OutboundTransportPool) Get(
 	ob adapter.Outbound,
 	sink MetricsEventSink,
 ) *http.Transport {
-	transport, _ := p.transports.LoadOrCompute(hash, func() (*http.Transport, bool) {
-		return p.newReusableOutboundTransport(ob, sink), false
-	})
+	p.mu.Lock()
+	if transport, ok := p.transports.Load(hash); ok {
+		p.mu.Unlock()
+		return transport
+	}
+	transport := p.newReusableOutboundTransport(ob, sink)
+	p.transports.Store(hash, transport)
+	p.order = append(p.order, transportEntry{hash: hash, transport: transport})
+	var evicted []*http.Transport
+	for len(p.order) > p.config.MaxTransports {
+		oldest := p.order[0]
+		p.order = p.order[1:]
+		current, ok := p.transports.Load(oldest.hash)
+		if !ok || current != oldest.transport {
+			continue
+		}
+		p.transports.Delete(oldest.hash)
+		evicted = append(evicted, oldest.transport)
+	}
+	p.mu.Unlock()
+	for _, old := range evicted {
+		old.CloseIdleConnections()
+	}
 	return transport
 }
 
 // Evict closes idle connections for one node transport and removes it from pool.
 func (p *OutboundTransportPool) Evict(hash node.Hash) {
+	p.mu.Lock()
 	transport, ok := p.transports.LoadAndDelete(hash)
+	p.mu.Unlock()
 	if !ok || transport == nil {
 		return
 	}
@@ -84,13 +121,31 @@ func (p *OutboundTransportPool) Evict(hash node.Hash) {
 
 // CloseAll closes idle connections and clears all pooled transports.
 func (p *OutboundTransportPool) CloseAll() {
+	p.mu.Lock()
+	var transports []*http.Transport
 	p.transports.Range(func(_ node.Hash, transport *http.Transport) bool {
 		if transport != nil {
-			transport.CloseIdleConnections()
+			transports = append(transports, transport)
 		}
 		return true
 	})
 	p.transports.Clear()
+	p.order = nil
+	p.mu.Unlock()
+	for _, transport := range transports {
+		transport.CloseIdleConnections()
+	}
+}
+
+func (p *OutboundTransportPool) transportCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	count := 0
+	p.transports.Range(func(_ node.Hash, _ *http.Transport) bool {
+		count++
+		return true
+	})
+	return count
 }
 
 func (p *OutboundTransportPool) newReusableOutboundTransport(ob adapter.Outbound, sink MetricsEventSink) *http.Transport {

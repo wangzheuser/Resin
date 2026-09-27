@@ -43,6 +43,7 @@ type resinApp struct {
 	inboundSrv     interface {
 		Serve(net.Listener) error
 		Shutdown(context.Context) error
+		SetMaxActiveConns(int)
 	}
 	inboundLn           net.Listener
 	transportPool       *proxy.OutboundTransportPool
@@ -396,20 +397,23 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 		MaxIdleConns:        a.envCfg.ProxyTransportMaxIdleConns,
 		MaxIdleConnsPerHost: a.envCfg.ProxyTransportMaxIdleConnsPerHost,
 		IdleConnTimeout:     a.envCfg.ProxyTransportIdleConnTimeout,
+		MaxTransports:       a.envCfg.ProxyTransportMaxTransports,
 	}
 	if a.transportPool == nil {
 		a.transportPool = proxy.NewOutboundTransportPool(outboundTransportCfg)
 	}
 
 	a.proxySessionManager = proxy.NewProxySessionManager(proxy.ProxySessionManagerConfig{
-		Router:            a.topoRuntime.router,
-		Pool:              a.topoRuntime.pool,
-		Health:            a.topoRuntime.pool,
-		Events:            proxyEvents,
-		MetricsSink:       a.metricsManager,
-		OutboundTransport: outboundTransportCfg,
-		TransportPool:     a.transportPool,
-		ProxyBypassRules:  a.envCfg.ProxyBypassRules,
+		Router:             a.topoRuntime.router,
+		Pool:               a.topoRuntime.pool,
+		Health:             a.topoRuntime.pool,
+		Events:             proxyEvents,
+		MetricsSink:        a.metricsManager,
+		OutboundTransport:  outboundTransportCfg,
+		TransportPool:      a.transportPool,
+		ProxyBypassRules:   a.envCfg.ProxyBypassRules,
+		ConnectIdleTimeout: a.envCfg.ProxyConnectIdleTimeout,
+		ConnectMaxLifetime: a.envCfg.ProxyConnectMaxLifetime,
 	})
 
 	tokenActionHandler := api.NewTokenActionHandlerWithProxySessions(
@@ -420,16 +424,18 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 	)
 
 	forwardProxy := proxy.NewForwardProxy(proxy.ForwardProxyConfig{
-		ProxyToken:        a.envCfg.ProxyToken,
-		AuthVersion:       string(a.envCfg.AuthVersion),
-		Router:            a.topoRuntime.router,
-		Pool:              a.topoRuntime.pool,
-		Health:            a.topoRuntime.pool,
-		Events:            proxyEvents,
-		MetricsSink:       a.metricsManager,
-		OutboundTransport: outboundTransportCfg,
-		TransportPool:     a.transportPool,
-		ProxyBypassRules:  a.envCfg.ProxyBypassRules,
+		ProxyToken:         a.envCfg.ProxyToken,
+		AuthVersion:        string(a.envCfg.AuthVersion),
+		Router:             a.topoRuntime.router,
+		Pool:               a.topoRuntime.pool,
+		Health:             a.topoRuntime.pool,
+		Events:             proxyEvents,
+		MetricsSink:        a.metricsManager,
+		OutboundTransport:  outboundTransportCfg,
+		TransportPool:      a.transportPool,
+		ProxyBypassRules:   a.envCfg.ProxyBypassRules,
+		ConnectIdleTimeout: a.envCfg.ProxyConnectIdleTimeout,
+		ConnectMaxLifetime: a.envCfg.ProxyConnectMaxLifetime,
 	})
 
 	reverseProxy := proxy.NewReverseProxy(proxy.ReverseProxyConfig{
@@ -447,14 +453,16 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 		ProxyBypassRules:  a.envCfg.ProxyBypassRules,
 	})
 	socks5Inbound := proxy.NewSocks5Inbound(proxy.Socks5InboundConfig{
-		ProxyToken:       a.envCfg.ProxyToken,
-		AuthVersion:      string(a.envCfg.AuthVersion),
-		Router:           a.topoRuntime.router,
-		Pool:             a.topoRuntime.pool,
-		Health:           a.topoRuntime.pool,
-		Events:           proxyEvents,
-		MetricsSink:      a.metricsManager,
-		ProxyBypassRules: a.envCfg.ProxyBypassRules,
+		ProxyToken:         a.envCfg.ProxyToken,
+		AuthVersion:        string(a.envCfg.AuthVersion),
+		Router:             a.topoRuntime.router,
+		Pool:               a.topoRuntime.pool,
+		Health:             a.topoRuntime.pool,
+		Events:             proxyEvents,
+		MetricsSink:        a.metricsManager,
+		ProxyBypassRules:   a.envCfg.ProxyBypassRules,
+		ConnectIdleTimeout: a.envCfg.ProxyConnectIdleTimeout,
+		ConnectMaxLifetime: a.envCfg.ProxyConnectMaxLifetime,
 	})
 
 	inboundHandler := newInboundMux(
@@ -469,7 +477,13 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 		return fmt.Errorf("resin server listen: %w", err)
 	}
 	a.inboundLn = proxy.NewCountingListener(inboundLn, a.metricsManager)
-	a.inboundSrv = newInboundDemuxServer(&http.Server{Handler: inboundHandler}, socks5Inbound)
+	a.inboundSrv = newInboundDemuxServer(&http.Server{
+		Handler:           inboundHandler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       time.Minute,
+		MaxHeaderBytes:    32 << 10,
+	}, socks5Inbound)
+	a.inboundSrv.SetMaxActiveConns(a.envCfg.MaxInboundConnections)
 
 	return nil
 }
@@ -575,6 +589,11 @@ func (a *resinApp) shutdown(ctx context.Context) {
 
 	a.topoRuntime.probeMgr.Stop()
 	log.Println("Probe manager stopped")
+
+	if a.topoRuntime.outboundMgr != nil {
+		a.topoRuntime.outboundMgr.CloseAll()
+		log.Println("Node outbounds closed")
+	}
 
 	a.geoSvc.Stop()
 	log.Println("GeoIP service stopped")

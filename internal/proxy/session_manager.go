@@ -47,19 +47,21 @@ type ProxySessionPool interface {
 
 // ProxySessionManagerConfig contains dependencies for browser proxy sessions.
 type ProxySessionManagerConfig struct {
-	Router            *routing.Router
-	Pool              ProxySessionPool
-	Health            HealthRecorder
-	Events            EventEmitter
-	MetricsSink       MetricsEventSink
-	OutboundTransport OutboundTransportConfig
-	TransportPool     *OutboundTransportPool
-	ProxyBypassRules  []string
-	BindHost          string
-	MinPort           int
-	MaxPort           int
-	MaxActiveSessions int
-	PortRetries       int
+	Router             *routing.Router
+	Pool               ProxySessionPool
+	Health             HealthRecorder
+	Events             EventEmitter
+	MetricsSink        MetricsEventSink
+	OutboundTransport  OutboundTransportConfig
+	TransportPool      *OutboundTransportPool
+	ProxyBypassRules   []string
+	ConnectIdleTimeout time.Duration
+	ConnectMaxLifetime time.Duration
+	BindHost           string
+	MinPort            int
+	MaxPort            int
+	MaxActiveSessions  int
+	PortRetries        int
 }
 
 // ProxySessionCreateRequest describes a browser proxy session allocation.
@@ -183,18 +185,25 @@ func (m *ProxySessionManager) Create(req ProxySessionCreateRequest) (ProxySessio
 	}
 
 	handler := NewForwardProxy(ForwardProxyConfig{
-		FixedPlatformName: plat.Name,
-		FixedAccount:      account,
-		Router:            m.cfg.Router,
-		Pool:              m.cfg.Pool,
-		Health:            m.cfg.Health,
-		Events:            m.cfg.Events,
-		MetricsSink:       m.cfg.MetricsSink,
-		OutboundTransport: m.cfg.OutboundTransport,
-		TransportPool:     m.cfg.TransportPool,
-		ProxyBypassRules:  m.cfg.ProxyBypassRules,
+		FixedPlatformName:  plat.Name,
+		FixedAccount:       account,
+		Router:             m.cfg.Router,
+		Pool:               m.cfg.Pool,
+		Health:             m.cfg.Health,
+		Events:             m.cfg.Events,
+		MetricsSink:        m.cfg.MetricsSink,
+		OutboundTransport:  m.cfg.OutboundTransport,
+		TransportPool:      m.cfg.TransportPool,
+		ProxyBypassRules:   m.cfg.ProxyBypassRules,
+		ConnectIdleTimeout: m.cfg.ConnectIdleTimeout,
+		ConnectMaxLifetime: m.cfg.ConnectMaxLifetime,
 	})
-	server := &http.Server{Handler: handler}
+	server := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       time.Minute,
+		MaxHeaderBytes:    32 << 10,
+	}
 	info := ProxySessionInfo{
 		ID:           id,
 		PlatformID:   plat.ID,

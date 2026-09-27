@@ -37,14 +37,16 @@ var socks5HandshakeTimeout = 15 * time.Second
 
 // Socks5InboundConfig holds dependencies for the SOCKS5 inbound handler.
 type Socks5InboundConfig struct {
-	ProxyToken       string
-	AuthVersion      string
-	Router           *routing.Router
-	Pool             outbound.PoolAccessor
-	Health           HealthRecorder
-	Events           EventEmitter
-	MetricsSink      MetricsEventSink
-	ProxyBypassRules []string
+	ProxyToken         string
+	AuthVersion        string
+	Router             *routing.Router
+	Pool               outbound.PoolAccessor
+	Health             HealthRecorder
+	Events             EventEmitter
+	MetricsSink        MetricsEventSink
+	ProxyBypassRules   []string
+	ConnectIdleTimeout time.Duration
+	ConnectMaxLifetime time.Duration
 }
 
 // Socks5Inbound implements SOCKS5 CONNECT over a raw TCP connection.
@@ -53,6 +55,7 @@ type Socks5Inbound struct {
 	authVersion config.AuthVersion
 	tunnel      tunnelDeps
 	events      EventEmitter
+	tunnelOpts  tunnelPumpOptions
 }
 
 type socks5HandshakeResult struct {
@@ -83,6 +86,10 @@ func NewSocks5Inbound(cfg Socks5InboundConfig) *Socks5Inbound {
 			bypass:      NewTargetBypassMatcher(cfg.ProxyBypassRules),
 		},
 		events: ev,
+		tunnelOpts: normalizeTunnelPumpOptions(tunnelPumpOptions{
+			idleTimeout: cfg.ConnectIdleTimeout,
+			maxLifetime: cfg.ConnectMaxLifetime,
+		}),
 	}
 }
 
@@ -156,7 +163,7 @@ func (s *Socks5Inbound) ServeConnContext(baseCtx context.Context, conn net.Conn)
 		return
 	}
 
-	relay := pumpPreparedTunnel(conn, reader, prepare.session, tunnelPumpOptions{})
+	relay := pumpPreparedTunnel(conn, reader, prepare.session, s.tunnelOpts)
 	lifecycle.addIngressBytes(relay.ingressBytes)
 	lifecycle.addEgressBytes(relay.egressBytes)
 	if relay.proxyErr != nil {

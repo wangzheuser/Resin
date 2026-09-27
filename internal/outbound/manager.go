@@ -131,6 +131,20 @@ func (m *OutboundManager) RemoveNodeOutbound(entry *node.NodeEntry) {
 	}
 }
 
+// CloseAll releases every node outbound during process shutdown. Outbound
+// implementations may own UDP/QUIC or DNS resources that are not represented
+// by the proxy HTTP transport pool, so closing only pooled HTTP connections is
+// insufficient for a clean Docker restart.
+func (m *OutboundManager) CloseAll() {
+	if m == nil || m.pool == nil {
+		return
+	}
+	m.pool.RangeNodes(func(_ node.Hash, entry *node.NodeEntry) bool {
+		m.RemoveNodeOutbound(entry)
+		return true
+	})
+}
+
 // WarmupAll iterates all nodes in the pool and ensures each has an outbound.
 // Called once after bootstrap to avoid ErrOutboundNotReady on restart.
 func (m *OutboundManager) WarmupAll() {

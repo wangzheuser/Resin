@@ -45,7 +45,11 @@ type EnvConfig struct {
 	ProxyTransportMaxIdleConns                      int
 	ProxyTransportMaxIdleConnsPerHost               int
 	ProxyTransportIdleConnTimeout                   time.Duration
+	ProxyTransportMaxTransports                     int
 	ProxyBypassRules                                []string
+	ProxyConnectIdleTimeout                         time.Duration
+	ProxyConnectMaxLifetime                         time.Duration
+	MaxInboundConnections                           int
 
 	// Request log
 	RequestLogQueueSize           int
@@ -126,7 +130,13 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	cfg.ProxyTransportMaxIdleConns = envInt("RESIN_PROXY_TRANSPORT_MAX_IDLE_CONNS", 1024, &errs)
 	cfg.ProxyTransportMaxIdleConnsPerHost = envInt("RESIN_PROXY_TRANSPORT_MAX_IDLE_CONNS_PER_HOST", 64, &errs)
 	cfg.ProxyTransportIdleConnTimeout = envDuration("RESIN_PROXY_TRANSPORT_IDLE_CONN_TIMEOUT", 90*time.Second, &errs)
+	cfg.ProxyTransportMaxTransports = envInt("RESIN_PROXY_TRANSPORT_MAX_NODES", 256, &errs)
 	cfg.ProxyBypassRules = envDelimitedStringSlice("RESIN_PROXY_BYPASS", []string{})
+	cfg.ProxyConnectIdleTimeout = envDuration("RESIN_PROXY_CONNECT_IDLE_TIMEOUT", 2*time.Minute, &errs)
+	cfg.ProxyConnectMaxLifetime = envDuration("RESIN_PROXY_CONNECT_MAX_LIFETIME", 30*time.Minute, &errs)
+	// Keep the process-level admission cap below the host's typical local TCP
+	// budget. Long-lived CONNECT clients are counted until their socket closes.
+	cfg.MaxInboundConnections = envInt("RESIN_MAX_INBOUND_CONNECTIONS", 256, &errs)
 
 	// --- Request log ---
 	cfg.RequestLogQueueSize = envInt("RESIN_REQUEST_LOG_QUEUE_SIZE", 8192, &errs)
@@ -309,6 +319,23 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	validatePositive("RESIN_PROXY_TRANSPORT_MAX_IDLE_CONNS_PER_HOST", cfg.ProxyTransportMaxIdleConnsPerHost, &errs)
 	if cfg.ProxyTransportIdleConnTimeout <= 0 {
 		errs = append(errs, "RESIN_PROXY_TRANSPORT_IDLE_CONN_TIMEOUT must be positive")
+	}
+	validatePositive("RESIN_PROXY_TRANSPORT_MAX_NODES", cfg.ProxyTransportMaxTransports, &errs)
+	if cfg.ProxyTransportMaxTransports > 100000 {
+		errs = append(errs, "RESIN_PROXY_TRANSPORT_MAX_NODES must be <= 100000")
+	}
+	if cfg.ProxyConnectIdleTimeout <= 0 {
+		errs = append(errs, "RESIN_PROXY_CONNECT_IDLE_TIMEOUT must be positive")
+	}
+	if cfg.ProxyConnectMaxLifetime <= 0 {
+		errs = append(errs, "RESIN_PROXY_CONNECT_MAX_LIFETIME must be positive")
+	}
+	if cfg.ProxyConnectMaxLifetime < cfg.ProxyConnectIdleTimeout {
+		errs = append(errs, "RESIN_PROXY_CONNECT_MAX_LIFETIME must be greater than or equal to RESIN_PROXY_CONNECT_IDLE_TIMEOUT")
+	}
+	validatePositive("RESIN_MAX_INBOUND_CONNECTIONS", cfg.MaxInboundConnections, &errs)
+	if cfg.MaxInboundConnections > 100000 {
+		errs = append(errs, "RESIN_MAX_INBOUND_CONNECTIONS must be <= 100000")
 	}
 	if cfg.ProxyTransportMaxIdleConnsPerHost > cfg.ProxyTransportMaxIdleConns {
 		errs = append(

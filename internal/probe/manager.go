@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -20,6 +21,9 @@ import (
 // response body and TLS handshake latency. This is injectable for testing.
 type Fetcher func(hash node.Hash, url string) (body []byte, latency time.Duration, err error)
 
+// ContextFetcher is the cancellation-aware probe fetcher used by runtime code.
+type ContextFetcher func(ctx context.Context, hash node.Hash, url string) (body []byte, latency time.Duration, err error)
+
 // ProbeConfig configures the ProbeManager.
 // Field names align 1:1 with RuntimeConfig to prevent mis-wiring.
 type ProbeConfig struct {
@@ -30,7 +34,8 @@ type ProbeConfig struct {
 	QueueCapacity int
 
 	// Fetcher executes HTTP via node hash. Injectable for testing.
-	Fetcher Fetcher
+	Fetcher        Fetcher
+	ContextFetcher ContextFetcher
 
 	// Interval thresholds — closures for hot-reload from RuntimeConfig.
 	MaxEgressTestInterval           func() time.Duration
@@ -53,14 +58,17 @@ type ProbeConfig struct {
 // ProbeManager schedules and executes active probes against nodes in the pool.
 // It holds a direct reference to *topology.GlobalNodePool (no interface).
 type ProbeManager struct {
-	pool        *topology.GlobalNodePool
-	stopCh      chan struct{}
-	stopOnce    sync.Once
-	wg          sync.WaitGroup
-	fetcher     Fetcher
-	workerCount int
-	taskQueue   *probeTaskQueue
-	taskStates  *xsync.Map[probeTaskKey, *probeTaskState]
+	pool           *topology.GlobalNodePool
+	stopCh         chan struct{}
+	stopOnce       sync.Once
+	wg             sync.WaitGroup
+	fetcher        Fetcher
+	contextFetcher ContextFetcher
+	probeCtx       context.Context
+	cancelProbe    context.CancelFunc
+	workerCount    int
+	taskQueue      *probeTaskQueue
+	taskStates     *xsync.Map[probeTaskKey, *probeTaskState]
 
 	maxEgressTestInterval           func() time.Duration
 	maxLatencyTestInterval          func() time.Duration
@@ -82,7 +90,6 @@ const (
 	egressTraceDomain       = "cloudflare.com"
 	defaultLatencyTestURL   = "https://www.gstatic.com/generate_204"
 	defaultProbeConcurrency = 16
-	periodicProbeBatchLimit = 128
 	probeStartInterval      = 100 * time.Millisecond
 	defaultQueueCap         = 1024
 	probeFailureInterval    = time.Minute
@@ -277,10 +284,14 @@ func NewProbeManager(cfg ProbeConfig) *ProbeManager {
 		}
 	}
 
+	probeCtx, cancelProbe := context.WithCancel(context.Background())
 	return &ProbeManager{
 		pool:                            cfg.Pool,
 		stopCh:                          make(chan struct{}),
 		fetcher:                         cfg.Fetcher,
+		contextFetcher:                  cfg.ContextFetcher,
+		probeCtx:                        probeCtx,
+		cancelProbe:                     cancelProbe,
 		workerCount:                     conc,
 		taskQueue:                       newProbeTaskQueue(queueCap, queueCap, cfg.ChooseNormalWhenBoth),
 		taskStates:                      xsync.NewMap[probeTaskKey, *probeTaskState](),
@@ -394,10 +405,23 @@ func (m *ProbeManager) flushFailureSummary() {
 func (m *ProbeManager) Stop() {
 	m.stopOnce.Do(func() {
 		close(m.stopCh)
+		if m.cancelProbe != nil {
+			m.cancelProbe()
+		}
 		m.taskQueue.StopDropPending()
 	})
 	m.wg.Wait()
 	m.flushFailureSummary()
+}
+
+func (m *ProbeManager) fetch(ctx context.Context, hash node.Hash, url string) ([]byte, time.Duration, error) {
+	if m.contextFetcher != nil {
+		return m.contextFetcher(ctx, hash, url)
+	}
+	if m.fetcher != nil {
+		return m.fetcher(hash, url)
+	}
+	return nil, 0, fmt.Errorf("no probe fetcher configured")
 }
 
 // TriggerImmediateEgressProbe enqueues an async egress probe for a node.
@@ -422,7 +446,7 @@ type EgressProbeResult struct {
 // ProbeEgressSync performs a blocking egress probe and returns the results.
 // Used by API action endpoints that must return probe data synchronously.
 func (m *ProbeManager) ProbeEgressSync(hash node.Hash) (*EgressProbeResult, error) {
-	if m.fetcher == nil {
+	if m.fetcher == nil && m.contextFetcher == nil {
 		return nil, fmt.Errorf("no probe fetcher configured")
 	}
 	select {
@@ -476,7 +500,7 @@ type LatencyProbeResult struct {
 
 // ProbeLatencySync performs a blocking latency probe and returns the results.
 func (m *ProbeManager) ProbeLatencySync(hash node.Hash) (*LatencyProbeResult, error) {
-	if m.fetcher == nil {
+	if m.fetcher == nil && m.contextFetcher == nil {
 		return nil, fmt.Errorf("no probe fetcher configured")
 	}
 	select {
@@ -531,9 +555,10 @@ func (m *ProbeManager) scanEgress() {
 	lookahead := 15 * time.Second
 	subLookup := m.pool.MakeSubLookup()
 	queued := 0
+	batchLimit := m.periodicBatchLimit()
 
 	m.pool.Range(func(h node.Hash, entry *node.NodeEntry) bool {
-		if queued >= periodicProbeBatchLimit {
+		if queued >= batchLimit {
 			return false
 		}
 		// Check stop signal.
@@ -614,9 +639,10 @@ func (m *ProbeManager) scanLatency() {
 		authorities = m.latencyAuthorities()
 	}
 	queued := 0
+	batchLimit := m.periodicBatchLimit()
 
 	m.pool.Range(func(h node.Hash, entry *node.NodeEntry) bool {
-		if queued >= periodicProbeBatchLimit {
+		if queued >= batchLimit {
 			return false
 		}
 		select {
@@ -655,6 +681,17 @@ func (m *ProbeManager) scanLatency() {
 
 		return true
 	})
+}
+
+// periodicBatchLimit keeps the scanner producer below the worker consumer.
+// A failed probe can occupy a worker for the full probe timeout, so a fixed
+// batch of 128 would fill the queue when concurrency is intentionally low.
+func (m *ProbeManager) periodicBatchLimit() int {
+	limit := m.workerCount / 2
+	if limit < 1 {
+		return 1
+	}
+	return limit
 }
 
 func (m *ProbeManager) runProbeWorker() {
@@ -925,7 +962,7 @@ func (m *ProbeManager) isLatencyProbeDue(
 // probeEgress performs a single egress probe against a node via Cloudflare trace.
 // Writes back: RecordResult, RecordLatency (cloudflare.com), UpdateNodeEgressIP.
 func (m *ProbeManager) probeEgress(hash node.Hash, entry *node.NodeEntry) {
-	if m.fetcher == nil {
+	if m.fetcher == nil && m.contextFetcher == nil {
 		return
 	}
 
@@ -952,7 +989,7 @@ func (m *ProbeManager) probeEgress(hash node.Hash, entry *node.NodeEntry) {
 // probeLatency performs a latency probe against a node using the configured test URL.
 // Writes back: RecordResult, RecordLatency.
 func (m *ProbeManager) probeLatency(hash node.Hash, entry *node.NodeEntry, testURL string) {
-	if m.fetcher == nil {
+	if m.fetcher == nil && m.contextFetcher == nil {
 		return
 	}
 
@@ -972,7 +1009,7 @@ func (m *ProbeManager) probeLatency(hash node.Hash, entry *node.NodeEntry, testU
 }
 
 func (m *ProbeManager) performEgressProbe(hash node.Hash) (netip.Addr, egressProbeErrorStage, error) {
-	body, latency, err := m.fetcher(hash, egressTraceURL)
+	body, latency, err := m.fetch(m.probeContext(), hash, egressTraceURL)
 	if err != nil {
 		m.pool.RecordResult(hash, false)
 		m.pool.UpdateNodeEgressIP(hash, nil, nil)
@@ -995,7 +1032,7 @@ func (m *ProbeManager) performEgressProbe(hash node.Hash) (netip.Addr, egressPro
 
 func (m *ProbeManager) performLatencyProbe(hash node.Hash, testURL string) error {
 	domain := netutil.ExtractDomain(testURL)
-	_, latency, err := m.fetcher(hash, testURL)
+	_, latency, err := m.fetch(m.probeContext(), hash, testURL)
 	if err != nil {
 		m.pool.RecordLatency(hash, domain, nil)
 		return err
@@ -1003,6 +1040,13 @@ func (m *ProbeManager) performLatencyProbe(hash node.Hash, testURL string) error
 
 	m.pool.RecordLatency(hash, domain, &latency)
 	return nil
+}
+
+func (m *ProbeManager) probeContext() context.Context {
+	if m.probeCtx == nil {
+		m.probeCtx, m.cancelProbe = context.WithCancel(context.Background())
+	}
+	return m.probeCtx
 }
 
 func (m *ProbeManager) currentLatencyTestURL() string {

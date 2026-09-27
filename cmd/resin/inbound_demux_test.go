@@ -802,6 +802,27 @@ func TestConnChannelListener_CloseRejectsQueuedConnAndFutureEnqueue(t *testing.T
 	}
 }
 
+func TestInboundDemuxServer_EnforcesActiveConnectionLimit(t *testing.T) {
+	demux := newInboundDemuxServer(nil, nil)
+	demux.SetMaxActiveConns(2)
+
+	if !demux.tryStartConnWorker() || !demux.tryStartConnWorker() {
+		t.Fatal("expected the first two workers to be admitted")
+	}
+	if demux.tryStartConnWorker() {
+		t.Fatal("expected workers above the active connection limit to be rejected")
+	}
+	demux.mu.Lock()
+	demux.activeWorkers = 0
+	demux.mu.Unlock()
+	demux.workerWG.Done()
+	demux.workerWG.Done()
+	if !demux.tryStartConnWorker() {
+		t.Fatal("expected a worker after an admitted connection completes")
+	}
+	demux.workerWG.Done()
+}
+
 func TestInboundDemux_TryStartConnWorkerStopsOnceShutdownBegins(t *testing.T) {
 	demux := &inboundDemuxServer{}
 	if !demux.tryStartConnWorker() {

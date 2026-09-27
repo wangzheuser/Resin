@@ -78,6 +78,7 @@ func TestOutboundTransportPool_AppliesConfiguredLimits(t *testing.T) {
 		MaxIdleConns:        9,
 		MaxIdleConnsPerHost: 3,
 		IdleConnTimeout:     12 * time.Second,
+		MaxTransports:       7,
 	})
 	ob := &noopOutbound{}
 	hash := node.Hash{1}
@@ -91,6 +92,24 @@ func TestOutboundTransportPool_AppliesConfiguredLimits(t *testing.T) {
 	}
 	if transport.IdleConnTimeout != 12*time.Second {
 		t.Fatalf("IdleConnTimeout: got %s, want %s", transport.IdleConnTimeout, 12*time.Second)
+	}
+}
+
+func TestOutboundTransportPool_BoundsRetainedNodeTransports(t *testing.T) {
+	pool := newOutboundTransportPoolWithConfig(OutboundTransportConfig{MaxTransports: 2})
+	ob := &noopOutbound{}
+	first := pool.Get(node.Hash{1}, ob, nil)
+	_ = pool.Get(node.Hash{2}, ob, nil)
+	third := pool.Get(node.Hash{3}, ob, nil)
+
+	if got := pool.transportCount(); got != 2 {
+		t.Fatalf("retained transport count = %d, want 2", got)
+	}
+	if again := pool.Get(node.Hash{1}, ob, nil); again == first {
+		t.Fatal("expected oldest node transport to be evicted")
+	}
+	if pool.Get(node.Hash{3}, ob, nil) != third {
+		t.Fatal("newest node transport should remain pooled")
 	}
 }
 

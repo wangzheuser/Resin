@@ -59,6 +59,19 @@ type closableOnly struct {
 	closed atomic.Bool
 }
 
+type shutdownClosableBuilder struct {
+	mu    sync.Mutex
+	built []*closableOnly
+}
+
+func (b *shutdownClosableBuilder) Build(_ json.RawMessage, _ ...string) (adapter.Outbound, error) {
+	ob := &closableOnly{}
+	b.mu.Lock()
+	b.built = append(b.built, ob)
+	b.mu.Unlock()
+	return ob, nil
+}
+
 func (c *closableOnly) Close() error {
 	c.closed.Store(true)
 	return nil
@@ -315,6 +328,32 @@ func TestRemoveNodeOutbound_NilEntry(t *testing.T) {
 	mgr := NewOutboundManager(pool, &testutil.StubOutboundBuilder{})
 	// Should not panic.
 	mgr.RemoveNodeOutbound(nil)
+}
+
+func TestCloseAll_ClosesNodeOutbounds(t *testing.T) {
+	pool := &mockPool{}
+	first := newTestEntry(`{"type":"close-all-1"}`)
+	second := newTestEntry(`{"type":"close-all-2"}`)
+	pool.addEntry(first)
+	pool.addEntry(second)
+	builder := &shutdownClosableBuilder{}
+	mgr := NewOutboundManager(pool, builder)
+	mgr.WarmupAll()
+	mgr.CloseAll()
+
+	if first.HasOutbound() || second.HasOutbound() {
+		t.Fatal("expected all node outbound references to be cleared")
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	if len(builder.built) != 2 {
+		t.Fatalf("built outbounds = %d, want 2", len(builder.built))
+	}
+	for _, ob := range builder.built {
+		if !ob.closed.Load() {
+			t.Fatal("expected every node outbound to be closed")
+		}
+	}
 }
 
 func TestFetch_OutboundNotReady(t *testing.T) {
