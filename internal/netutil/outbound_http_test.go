@@ -9,9 +9,67 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Resinat/Resin/internal/testutil"
 )
+
+func TestHTTPGetViaTransportReusesConnection(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	var dials atomic.Int32
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dials.Add(1)
+			var d net.Dialer
+			return d.DialContext(ctx, network, addr)
+		},
+		MaxIdleConns:        1,
+		MaxIdleConnsPerHost: 1,
+		IdleConnTimeout:     time.Minute,
+	}
+	defer transport.CloseIdleConnections()
+
+	for i := 0; i < 2; i++ {
+		body, _, err := HTTPGetViaTransport(context.Background(), transport, srv.URL, OutboundHTTPOptions{})
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		if string(body) != "ok" {
+			t.Fatalf("request %d body = %q", i, body)
+		}
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests = %d, want 2", got)
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dials = %d, want one reused connection", got)
+	}
+}
+
+func TestHTTPGetViaTransportReportsLatencyOnReuse(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(2 * time.Millisecond)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+	transport := srv.Client().Transport.(*http.Transport).Clone()
+	defer transport.CloseIdleConnections()
+	for i := 0; i < 2; i++ {
+		_, latency, err := HTTPGetViaTransport(context.Background(), transport, srv.URL, OutboundHTTPOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if latency <= 0 {
+			t.Fatalf("request %d: latency = %s; reused HTTPS must report request RTT", i, latency)
+		}
+	}
+}
 
 func TestHTTPGetViaOutbound_RequireStatusOK(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

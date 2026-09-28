@@ -965,3 +965,17 @@ func TestMarkNodeRemovedDirty_DeletesStaticDynamicAndLatency(t *testing.T) {
 		t.Fatalf("node_latency not deleted: %+v", latencies)
 	}
 }
+
+func TestShouldTriggerRelayCandidateProbeSkipsCircuitOpenNodes(t *testing.T) {
+	if shouldTriggerRelayCandidateProbe(nil) {
+		t.Fatal("nil entry should not trigger a relay probe")
+	}
+	entry := node.NewNodeEntry(node.Hash{1}, nil, time.Now(), 0)
+	if !shouldTriggerRelayCandidateProbe(entry) {
+		t.Fatal("healthy entry should trigger a relay probe")
+	}
+	entry.CircuitOpenSince.Store(time.Now().UnixNano())
+	if shouldTriggerRelayCandidateProbe(entry) {
+		t.Fatal("circuit-open entry should not trigger an immediate relay probe")
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sagernet/sing-box/adapter"
@@ -27,6 +28,7 @@ const (
 	defaultTransportMaxIdleConnsPerHost = 64
 	defaultTransportIdleConnTimeout     = 90 * time.Second
 	defaultTransportMaxTransports       = 256
+	defaultTransportTLSHandshakeTimeout = 10 * time.Second
 )
 
 func normalizeOutboundTransportConfig(cfg OutboundTransportConfig) OutboundTransportConfig {
@@ -49,10 +51,11 @@ func normalizeOutboundTransportConfig(cfg OutboundTransportConfig) OutboundTrans
 // A single instance should be shared by forward/reverse proxies so keep-alive pools
 // are reused and can be evicted on node removal.
 type OutboundTransportPool struct {
-	config     OutboundTransportConfig
-	transports *xsync.Map[node.Hash, *http.Transport]
-	mu         sync.Mutex
-	order      []transportEntry
+	config      OutboundTransportConfig
+	transports  *xsync.Map[node.Hash, *http.Transport]
+	mu          sync.Mutex
+	order       []transportEntry
+	defaultSink MetricsEventSink
 }
 
 type transportEntry struct {
@@ -76,6 +79,18 @@ func NewOutboundTransportPool(cfg OutboundTransportConfig) *OutboundTransportPoo
 	}
 }
 
+// SetMetricsSink sets the sink used when callers do not provide one explicitly.
+// It is applied to transports created after the call; existing transports keep
+// their sink so connection accounting remains consistent for their lifetime.
+func (p *OutboundTransportPool) SetMetricsSink(sink MetricsEventSink) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.defaultSink = sink
+	p.mu.Unlock()
+}
+
 // Get returns a reusable transport for the given node hash.
 func (p *OutboundTransportPool) Get(
 	hash node.Hash,
@@ -86,6 +101,9 @@ func (p *OutboundTransportPool) Get(
 	if transport, ok := p.transports.Load(hash); ok {
 		p.mu.Unlock()
 		return transport
+	}
+	if sink == nil {
+		sink = p.defaultSink
 	}
 	transport := p.newReusableOutboundTransport(ob, sink)
 	p.transports.Store(hash, transport)
@@ -151,7 +169,9 @@ func (p *OutboundTransportPool) transportCount() int {
 func (p *OutboundTransportPool) newReusableOutboundTransport(ob adapter.Outbound, sink MetricsEventSink) *http.Transport {
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			conn, err := ob.DialContext(ctx, network, M.ParseSocksaddr(addr))
+			dialCtx, cancel := netutil.ApplyDialDeadline(ctx)
+			defer cancel()
+			conn, err := ob.DialContext(dialCtx, network, M.ParseSocksaddr(addr))
 			if err != nil {
 				return nil, err
 			}
@@ -163,6 +183,7 @@ func (p *OutboundTransportPool) newReusableOutboundTransport(ob adapter.Outbound
 		},
 		DisableKeepAlives:   false,
 		ForceAttemptHTTP2:   true,
+		TLSHandshakeTimeout: defaultTransportTLSHandshakeTimeout,
 		MaxIdleConns:        p.config.MaxIdleConns,
 		MaxIdleConnsPerHost: p.config.MaxIdleConnsPerHost,
 		IdleConnTimeout:     p.config.IdleConnTimeout,
@@ -174,7 +195,9 @@ func newDirectHTTPTransport(cfg OutboundTransportConfig, sink MetricsEventSink) 
 	dialer := &net.Dialer{}
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			conn, err := dialer.DialContext(ctx, network, addr)
+			dialCtx, cancel := netutil.ApplyDialDeadline(ctx)
+			defer cancel()
+			conn, err := dialer.DialContext(dialCtx, network, addr)
 			if err != nil {
 				return nil, err
 			}
@@ -186,6 +209,7 @@ func newDirectHTTPTransport(cfg OutboundTransportConfig, sink MetricsEventSink) 
 		},
 		DisableKeepAlives:   false,
 		ForceAttemptHTTP2:   true,
+		TLSHandshakeTimeout: defaultTransportTLSHandshakeTimeout,
 		MaxIdleConns:        cfg.MaxIdleConns,
 		MaxIdleConnsPerHost: cfg.MaxIdleConnsPerHost,
 		IdleConnTimeout:     cfg.IdleConnTimeout,

@@ -4,13 +4,30 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/sagernet/sing-box/adapter"
 	M "github.com/sagernet/sing/common/metadata"
 )
+
+type transportMetricsSink struct {
+	open  atomic.Int32
+	close atomic.Int32
+}
+
+func (s *transportMetricsSink) OnTrafficDelta(int64, int64) {}
+func (s *transportMetricsSink) OnConnectionLifecycle(_ ConnectionDirection, op ConnectionOp) {
+	switch op {
+	case ConnectionOpen:
+		s.open.Add(1)
+	case ConnectionClose:
+		s.close.Add(1)
+	}
+}
 
 type noopOutbound struct {
 	adapter.Outbound
@@ -32,6 +49,18 @@ func TestOutboundTransportPool_ReusesByNodeHash(t *testing.T) {
 
 	if t1 != t2 {
 		t.Fatal("expected same transport instance for identical node hash")
+	}
+}
+
+func TestOutboundTransportPool_SetsDefaultMetricsSink(t *testing.T) {
+	p := newOutboundTransportPool()
+	sink := &transportMetricsSink{}
+	p.SetMetricsSink(sink)
+	p.mu.Lock()
+	got := p.defaultSink
+	p.mu.Unlock()
+	if got != sink {
+		t.Fatal("default metrics sink was not retained")
 	}
 }
 
@@ -127,5 +156,23 @@ func TestOutboundTransportPool_CloseAllClearsEntries(t *testing.T) {
 	t2 := pool.Get(hashA, ob, nil)
 	if t1 == t2 {
 		t.Fatal("expected a new transport after CloseAll")
+	}
+}
+
+func TestOutboundTransportPool_DialHasDeadline(t *testing.T) {
+	pool := newOutboundTransportPool()
+	defer pool.CloseAll()
+	hasDeadline := false
+	ob := &mockOutbound{dialFunc: func(ctx context.Context, _ string, _ M.Socksaddr) (net.Conn, error) {
+		_, hasDeadline = ctx.Deadline()
+		return nil, errors.New("test dial finished")
+	}}
+	transport := pool.Get(node.Hash{1}, ob, nil)
+	_, _ = transport.DialContext(netutil.WithDialDeadline(context.Background(), time.Now().Add(time.Second)), "tcp", "example.test:443")
+	if !hasDeadline {
+		t.Fatal("outbound dial has no deadline after HTTP transport detaches request cancellation")
+	}
+	if transport.TLSHandshakeTimeout <= 0 {
+		t.Fatal("TLS handshake has no timeout after HTTP transport detaches request cancellation")
 	}
 }

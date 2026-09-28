@@ -236,6 +236,7 @@ func newTopologyRuntime(
 	runtimeCfg *atomic.Pointer[config.RuntimeConfig],
 	geoSvc *geoip.Service,
 	downloader netutil.Downloader,
+	probeTransportPool *proxy.OutboundTransportPool,
 	onProbeConnLifecycle func(netutil.ConnLifecycleOp),
 	onNodeRemoved func(node.Hash),
 ) (*topologyRuntime, error) {
@@ -277,7 +278,8 @@ func newTopologyRuntime(
 		RelayPool:              pool,
 		ResolveRelayPlatformID: relayPlatformResolver,
 		OnRelayCandidateFailure: func(hash node.Hash) {
-			if probeMgr != nil {
+			entry, ok := pool.GetEntry(hash)
+			if probeMgr != nil && ok && shouldTriggerRelayCandidateProbe(entry) {
 				probeMgr.TriggerImmediateEgressProbe(hash)
 			}
 		},
@@ -301,13 +303,14 @@ func newTopologyRuntime(
 			if outboundPtr == nil {
 				return nil, 0, outbound.ErrOutboundNotReady
 			}
-			return netutil.HTTPGetViaOutbound(ctx, *outboundPtr, url, netutil.OutboundHTTPOptions{
+			if probeTransportPool == nil {
+				return netutil.HTTPGetViaOutbound(ctx, *outboundPtr, url, netutil.OutboundHTTPOptions{
+					RequireStatusOK: false,
+					OnConnLifecycle: onProbeConnLifecycle,
+				})
+			}
+			return netutil.HTTPGetViaTransport(ctx, probeTransportPool.Get(hash, *outboundPtr, nil), url, netutil.OutboundHTTPOptions{
 				RequireStatusOK: false,
-				OnConnLifecycle: func(op netutil.ConnLifecycleOp) {
-					if onProbeConnLifecycle != nil {
-						onProbeConnLifecycle(op)
-					}
-				},
 			})
 		},
 		MaxEgressTestInterval: func() time.Duration {
@@ -378,6 +381,10 @@ func newTopologyRuntime(
 		outboundMgr:      outboundMgr,
 		singboxBuilder:   singboxBuilder,
 	}, nil
+}
+
+func shouldTriggerRelayCandidateProbe(entry *node.NodeEntry) bool {
+	return entry != nil && !entry.IsCircuitOpen()
 }
 
 // newNodeRelayPlatformResolver derives the scoped relay configuration from a

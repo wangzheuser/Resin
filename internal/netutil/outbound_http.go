@@ -24,6 +24,32 @@ const (
 	ConnLifecycleClose
 )
 
+type dialDeadlineContextKey struct{}
+
+// WithDialDeadline preserves an HTTP request deadline for custom dialers.
+// net/http intentionally detaches its dial context from request cancellation.
+func WithDialDeadline(ctx context.Context, deadline time.Time) context.Context {
+	if ctx == nil || deadline.IsZero() {
+		return ctx
+	}
+	return context.WithValue(ctx, dialDeadlineContextKey{}, deadline)
+}
+
+// ApplyDialDeadline restores a request deadline on a transport dial context.
+func ApplyDialDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		return context.Background(), func() {}
+	}
+	deadline, ok := ctx.Value(dialDeadlineContextKey{}).(time.Time)
+	if !ok || deadline.IsZero() {
+		return ctx, func() {}
+	}
+	if current, ok := ctx.Deadline(); ok && !deadline.Before(current) {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, deadline)
+}
+
 // OutboundHTTPOptions controls outbound-backed HTTP execution behavior.
 type OutboundHTTPOptions struct {
 	// RequireStatusOK enforces HTTP 200 status; otherwise any status is accepted.
@@ -34,6 +60,21 @@ type OutboundHTTPOptions struct {
 	// lifecycle for metrics. Set by probe callers to count outbound connections;
 	// left nil for download callers (GeoIP, subscription) to exclude from stats.
 	OnConnLifecycle func(op ConnLifecycleOp)
+}
+
+// HTTPGetViaTransport executes an HTTP GET with a caller-owned transport.
+// The transport may be reused across requests; callers own its lifecycle and
+// should close idle connections when the owning pool is stopped or evicted.
+func HTTPGetViaTransport(
+	ctx context.Context,
+	transport *http.Transport,
+	url string,
+	opts OutboundHTTPOptions,
+) ([]byte, time.Duration, error) {
+	if transport == nil {
+		return nil, 0, fmt.Errorf("outbound fetch: transport is nil")
+	}
+	return httpGetWithClient(ctx, &http.Client{Transport: transport}, url, opts)
 }
 
 // HTTPGetViaOutbound executes an HTTP GET through the provided outbound.
@@ -50,7 +91,9 @@ func HTTPGetViaOutbound(
 
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			conn, err := outbound.DialContext(ctx, network, M.ParseSocksaddr(addr))
+			dialCtx, cancel := ApplyDialDeadline(ctx)
+			defer cancel()
+			conn, err := outbound.DialContext(dialCtx, network, M.ParseSocksaddr(addr))
 			if err != nil {
 				return nil, err
 			}
@@ -65,8 +108,18 @@ func HTTPGetViaOutbound(
 	}
 	defer transport.CloseIdleConnections()
 
-	client := &http.Client{
-		Transport: transport,
+	client := &http.Client{Transport: transport}
+	return httpGetWithClient(ctx, client, url, opts)
+}
+
+func httpGetWithClient(
+	ctx context.Context,
+	client *http.Client,
+	url string,
+	opts OutboundHTTPOptions,
+) ([]byte, time.Duration, error) {
+	if client == nil || client.Transport == nil {
+		return nil, 0, fmt.Errorf("outbound fetch: client transport is nil")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -80,7 +133,8 @@ func HTTPGetViaOutbound(
 	}
 	req.Header.Set("User-Agent", userAgent)
 
-	var start time.Time
+	requestStart := time.Now()
+	var start, firstByte time.Time
 	var latency time.Duration
 	trace := &httptrace.ClientTrace{
 		TLSHandshakeStart: func() { start = time.Now() },
@@ -89,8 +143,13 @@ func HTTPGetViaOutbound(
 				latency = time.Since(start)
 			}
 		},
+		GotFirstResponseByte: func() { firstByte = time.Now() },
 	}
-	req = req.WithContext(httptrace.WithClientTrace(ctx, trace))
+	requestCtx := httptrace.WithClientTrace(ctx, trace)
+	if deadline, ok := ctx.Deadline(); ok {
+		requestCtx = WithDialDeadline(requestCtx, deadline)
+	}
+	req = req.WithContext(requestCtx)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -98,6 +157,18 @@ func HTTPGetViaOutbound(
 	}
 	defer resp.Body.Close()
 
+	requestDone := time.Now()
+	if latency <= 0 {
+		switch {
+		case !firstByte.IsZero() && firstByte.After(requestStart):
+			latency = firstByte.Sub(requestStart)
+		default:
+			latency = requestDone.Sub(requestStart)
+		}
+		if latency <= 0 {
+			latency = time.Nanosecond
+		}
+	}
 	if opts.RequireStatusOK && resp.StatusCode != http.StatusOK {
 		return nil, latency, fmt.Errorf("outbound fetch: unexpected status %d from %s", resp.StatusCode, url)
 	}

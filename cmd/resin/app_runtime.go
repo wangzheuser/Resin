@@ -97,6 +97,7 @@ func newResinApp(envCfg *config.EnvConfig, engine *state.StateEngine) (*resinApp
 		return nil, err
 	}
 	app.accountMatcher = buildAccountMatcher(engine)
+	app.transportPool = proxy.NewOutboundTransportPool(outboundTransportConfig(envCfg))
 
 	retryDL, err := app.initTopologyRuntime(engine)
 	if err != nil {
@@ -134,6 +135,7 @@ func (a *resinApp) initTopologyRuntime(engine *state.StateEngine) (*netutil.Retr
 		a.runtimeCfg,
 		a.geoSvc,
 		retryDL,
+		a.transportPool,
 		a.onProbeConnectionLifecycle,
 		func(hash node.Hash) {
 			if a.transportPool != nil {
@@ -172,6 +174,15 @@ func (a *resinApp) initTopologyRuntime(engine *state.StateEngine) (*netutil.Retr
 	a.topoRuntime.leaseCleaner = routing.NewLeaseCleaner(a.topoRuntime.router)
 	log.Println("Router and LeaseCleaner initialized")
 	return retryDL, nil
+}
+
+func outboundTransportConfig(envCfg *config.EnvConfig) proxy.OutboundTransportConfig {
+	return proxy.OutboundTransportConfig{
+		MaxIdleConns:        envCfg.ProxyTransportMaxIdleConns,
+		MaxIdleConnsPerHost: envCfg.ProxyTransportMaxIdleConnsPerHost,
+		IdleConnTimeout:     envCfg.ProxyTransportIdleConnTimeout,
+		MaxTransports:       envCfg.ProxyTransportMaxTransports,
+	}
 }
 
 func (a *resinApp) onProbeConnectionLifecycle(op netutil.ConnLifecycleOp) {
@@ -306,6 +317,9 @@ func (a *resinApp) initObservability() error {
 			},
 		},
 	})
+	if a.transportPool != nil {
+		a.transportPool.SetMetricsSink(a.metricsManager)
+	}
 
 	a.requestlogRepo = requestlog.NewRepo(
 		a.envCfg.LogDir,
@@ -393,12 +407,7 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 		a.metricsManager,
 	)
 	proxyEvents := a.buildProxyEvents()
-	outboundTransportCfg := proxy.OutboundTransportConfig{
-		MaxIdleConns:        a.envCfg.ProxyTransportMaxIdleConns,
-		MaxIdleConnsPerHost: a.envCfg.ProxyTransportMaxIdleConnsPerHost,
-		IdleConnTimeout:     a.envCfg.ProxyTransportIdleConnTimeout,
-		MaxTransports:       a.envCfg.ProxyTransportMaxTransports,
-	}
+	outboundTransportCfg := outboundTransportConfig(a.envCfg)
 	if a.transportPool == nil {
 		a.transportPool = proxy.NewOutboundTransportPool(outboundTransportCfg)
 	}
@@ -571,11 +580,6 @@ func (a *resinApp) shutdown(ctx context.Context) {
 		a.proxySessionManager.Close()
 		log.Println("Proxy session manager stopped")
 	}
-	if a.transportPool != nil {
-		a.transportPool.CloseAll()
-		log.Println("Outbound transport pool closed")
-	}
-
 	// Stop in order: event sources first, then sinks, then persistence.
 	// 1. Stop all event sources (no more events after this).
 	a.topoRuntime.leaseCleaner.Stop()
@@ -593,6 +597,10 @@ func (a *resinApp) shutdown(ctx context.Context) {
 	if a.topoRuntime.outboundMgr != nil {
 		a.topoRuntime.outboundMgr.CloseAll()
 		log.Println("Node outbounds closed")
+	}
+	if a.transportPool != nil {
+		a.transportPool.CloseAll()
+		log.Println("Outbound transport pool closed")
 	}
 
 	a.geoSvc.Stop()
