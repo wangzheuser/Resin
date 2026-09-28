@@ -1410,7 +1410,8 @@ func TestAPIContract_SubscriptionRelayPlatformReference(t *testing.T) {
 	srv, _, _ := newControlPlaneTestServer(t)
 
 	platformRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
-		"name": "RelayGate",
+		"name":          "RelayGate",
+		"regex_filters": []string{"^relay-gate/.*"},
 	}, true)
 	if platformRec.Code != http.StatusCreated {
 		t.Fatalf("create relay platform status: got %d, want %d, body=%s", platformRec.Code, http.StatusCreated, platformRec.Body.String())
@@ -1466,6 +1467,60 @@ func TestAPIContract_SubscriptionRelayPlatformReference(t *testing.T) {
 		t.Fatalf("missing relay Platform status: got %d, want %d, body=%s", missingRec.Code, http.StatusNotFound, missingRec.Body.String())
 	}
 	assertErrorCode(t, missingRec, "NOT_FOUND")
+}
+
+// Relay eligibility depends on actual candidates, not the subscription name.
+// Broad or overlapping filters can still contain valid direct relay nodes.
+func TestAPIContract_SubscriptionRelayPlatformAllowsOverlappingFilters(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		filters []string
+	}{
+		{"unfiltered", []string{}},
+		{"wildcard", []string{".*"}},
+		{"prefix", []string{"^self-relay/.*"}},
+		{"nonempty-tag", []string{"^self-relay/.+"}},
+		{"exact-tag", []string{"^self-relay/direct$"}},
+		{"multiple", []string{"^self-relay/", "direct$"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, _ := newControlPlaneTestServer(t)
+			platformRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
+				"name":          "RelayGate",
+				"regex_filters": tc.filters,
+			}, true)
+			if platformRec.Code != http.StatusCreated {
+				t.Fatalf("create platform: status=%d body=%s", platformRec.Code, platformRec.Body.String())
+			}
+			platformID := decodeJSONMap(t, platformRec)["id"].(string)
+			createRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/subscriptions", map[string]any{
+				"name":              "self-relay",
+				"url":               "https://example.com/subscription",
+				"relay_platform_id": platformID,
+			}, true)
+			if createRec.Code != http.StatusCreated {
+				t.Fatalf("create subscription: status=%d body=%s", createRec.Code, createRec.Body.String())
+			}
+			body := decodeJSONMap(t, createRec)
+			if body["relay_platform_id"] != platformID {
+				t.Fatalf("relay_platform_id=%v, want %s", body["relay_platform_id"], platformID)
+			}
+			id := body["id"].(string)
+			for _, name := range []string{"other-subscription", "self-relay"} {
+				rec := doJSONRequest(t, srv, http.MethodPatch, "/api/v1/subscriptions/"+id, map[string]any{
+					"name":              name,
+					"relay_platform_id": platformID,
+				}, true)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("update subscription: status=%d body=%s", rec.Code, rec.Body.String())
+				}
+				updated := decodeJSONMap(t, rec)
+				if updated["name"] != name || updated["relay_platform_id"] != platformID {
+					t.Fatalf("unexpected updated subscription: %v", updated)
+				}
+			}
+		})
+	}
 }
 
 func TestAPIContract_SubscriptionEphemeralEvictDelay_DefaultAndCustom(t *testing.T) {
