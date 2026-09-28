@@ -334,6 +334,13 @@ func TestPlatformRelayDialer_BoundsAttemptsAndRejectsSecondHop(t *testing.T) {
 	if !errors.Is(err, ErrNoRelayCandidates) {
 		t.Fatalf("second-hop filter error = %v", err)
 	}
+	var candidateErr *relayCandidateError
+	if !errors.As(err, &candidateErr) {
+		t.Fatalf("second-hop error type = %T, want relayCandidateError", err)
+	}
+	if candidateErr.stats.total != len(entries) || candidateErr.stats.alreadyRelayed != len(entries) {
+		t.Fatalf("second-hop stats = %+v, want total/already_relayed=%d", candidateErr.stats, len(entries))
+	}
 }
 
 func TestPlatformRelayDialer_RejectsTargetSelfProxy(t *testing.T) {
@@ -347,6 +354,32 @@ func TestPlatformRelayDialer_RejectsTargetSelfProxy(t *testing.T) {
 	_, err := dialer.DialContext(context.Background(), "tcp", M.ParseSocksaddr("198.51.100.10:443"))
 	if !errors.Is(err, ErrNoRelayCandidates) {
 		t.Fatalf("self-proxy filter error = %v", err)
+	}
+}
+
+func TestPlatformRelayDialer_MixedCandidatesRetainsDirectRelay(t *testing.T) {
+	direct, _ := newRelayCandidate(t, "203.0.113.1", 443, "direct")
+	relayed, _ := newRelayCandidate(t, "203.0.113.2", 443, "relayed")
+	self, _ := newRelayCandidate(t, "198.51.100.10", 443, "self")
+	entries := map[node.Hash]*node.NodeEntry{
+		direct.Hash: direct, relayed.Hash: relayed, self.Hash: self,
+	}
+	pool := &relayTestPool{
+		entries:   entries,
+		platforms: map[string]*platform.Platform{"relay-id": buildRelayTestPlatform("relay-id", entries)},
+	}
+	dialer := newPlatformRelayDialer(pool, "relay-id", func(entry *node.NodeEntry) (string, error) {
+		if entry.Hash == relayed.Hash {
+			return "relay-id", nil
+		}
+		return "", nil
+	}, nil)
+	candidates, err := dialer.snapshotCandidates("tcp", M.ParseSocksaddr("198.51.100.10:443"))
+	if err != nil {
+		t.Fatalf("snapshotCandidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].hash != direct.Hash {
+		t.Fatalf("candidates = %v, want only direct relay %v", candidates, direct.Hash)
 	}
 }
 

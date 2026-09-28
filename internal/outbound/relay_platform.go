@@ -32,6 +32,51 @@ var (
 	ErrNoRelayCandidates = errors.New("no eligible relay candidates")
 )
 
+// relayCandidateStats explains why a relay Platform did not produce a
+// candidate. The counters are intentionally kept on the error so callers can
+// surface actionable diagnostics without adding per-node log noise.
+type relayCandidateStats struct {
+	total               int
+	missing             int
+	unhealthy           int
+	hasDetour           int
+	resolverUnavailable int
+	resolverError       int
+	alreadyRelayed      int
+	targetSelf          int
+	noOutbound          int
+	unsupportedNetwork  int
+}
+
+func (s relayCandidateStats) String() string {
+	return fmt.Sprintf(
+		"total=%d missing=%d unhealthy=%d detour=%d resolver_unavailable=%d resolver_error=%d already_relayed=%d target_self=%d no_outbound=%d unsupported_network=%d",
+		s.total,
+		s.missing,
+		s.unhealthy,
+		s.hasDetour,
+		s.resolverUnavailable,
+		s.resolverError,
+		s.alreadyRelayed,
+		s.targetSelf,
+		s.noOutbound,
+		s.unsupportedNetwork,
+	)
+}
+
+// relayCandidateError preserves ErrNoRelayCandidates for errors.Is while
+// retaining the exclusion breakdown for logs and diagnostics.
+type relayCandidateError struct {
+	platformID string
+	stats      relayCandidateStats
+}
+
+func (e *relayCandidateError) Error() string {
+	return fmt.Sprintf("%v: platform %s (%s)", ErrNoRelayCandidates, e.platformID, e.stats.String())
+}
+
+func (e *relayCandidateError) Unwrap() error { return ErrNoRelayCandidates }
+
 // NodeRelayPlatformResolver resolves the relay Platform assigned to a node.
 // Empty output means the node is direct.
 type NodeRelayPlatformResolver func(entry *node.NodeEntry) (string, error)
@@ -213,31 +258,54 @@ func (d *platformRelayDialer) snapshotCandidates(
 	})
 
 	candidates := make([]relayCandidate, 0, len(hashes))
+	var stats relayCandidateStats
 	for _, hash := range hashes {
+		stats.total++
 		entry, exists := d.pool.GetEntry(hash)
-		if !exists || entry == nil || !entry.IsHealthy() || rawOutboundHasDetour(entry.RawOptions) {
+		if !exists || entry == nil {
+			stats.missing++
+			continue
+		}
+		if !entry.IsHealthy() {
+			stats.unhealthy++
+			continue
+		}
+		if rawOutboundHasDetour(entry.RawOptions) {
+			stats.hasDetour++
 			continue
 		}
 		if d.resolveRelayPlatformID == nil {
+			stats.resolverUnavailable++
 			continue
 		}
 		candidateRelayPlatformID, resolveErr := d.resolveRelayPlatformID(entry)
-		if resolveErr != nil || candidateRelayPlatformID != "" {
+		if resolveErr != nil {
+			stats.resolverError++
+			continue
+		}
+		if candidateRelayPlatformID != "" {
+			stats.alreadyRelayed++
 			// A relayed candidate would create a second hop.
 			continue
 		}
 		if rawOutboundTargetsDestination(entry.RawOptions, destination) {
+			stats.targetSelf++
 			// Avoid asking the target node to proxy a connection to itself.
 			continue
 		}
 		outboundPtr := entry.Outbound.Load()
-		if outboundPtr == nil || !outboundSupportsNetwork(*outboundPtr, network) {
+		if outboundPtr == nil {
+			stats.noOutbound++
+			continue
+		}
+		if !outboundSupportsNetwork(*outboundPtr, network) {
+			stats.unsupportedNetwork++
 			continue
 		}
 		candidates = append(candidates, relayCandidate{hash: hash, outbound: *outboundPtr})
 	}
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("%w: platform %s", ErrNoRelayCandidates, d.platformID)
+		return nil, &relayCandidateError{platformID: d.platformID, stats: stats}
 	}
 	return candidates, nil
 }
