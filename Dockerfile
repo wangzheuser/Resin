@@ -35,7 +35,13 @@ RUN CGO_ENABLED=0 go build -trimpath -tags "with_quic with_wireguard with_grpc w
 FROM ${DOCKER_MIRROR}/alpine:3.21
 # NOTE: Keep this runtime stage in sync with .github/Dockerfile.release.
 # GHCR release images are built from .github/Dockerfile.release, not this file.
-RUN apk add --no-cache ca-certificates tzdata su-exec \
+# Optional Alpine mirror root, e.g. https://mirrors.aliyun.com/alpine.
+# Leave empty to keep the base image's repositories.
+ARG APK_MIRROR=
+RUN if [ -n "${APK_MIRROR}" ]; then \
+      sed -i -E "s|https?://dl-cdn.alpinelinux.org/alpine|${APK_MIRROR%/}|g" /etc/apk/repositories; \
+    fi \
+  && apk add --no-cache ca-certificates tzdata su-exec \
   && addgroup -S resin \
   && adduser -S -G resin -h /var/lib/resin resin \
   && mkdir -p /var/cache/resin /var/lib/resin /var/log/resin \

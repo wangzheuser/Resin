@@ -4,7 +4,13 @@ FROM alpine:3.21
 ARG TARGETOS
 ARG TARGETARCH
 
-RUN apk add --no-cache ca-certificates tzdata su-exec \
+# Optional Alpine mirror root, e.g. https://mirrors.aliyun.com/alpine.
+# Leave empty to keep the base image's repositories.
+ARG APK_MIRROR=
+RUN if [ -n "${APK_MIRROR}" ]; then \
+      sed -i -E "s|https?://dl-cdn.alpinelinux.org/alpine|${APK_MIRROR%/}|g" /etc/apk/repositories; \
+    fi \
+  && apk add --no-cache ca-certificates tzdata su-exec \
   && addgroup -S resin \
   && adduser -S -G resin -h /var/lib/resin resin \
   && mkdir -p /var/cache/resin /var/lib/resin /var/log/resin \
