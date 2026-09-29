@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing/common"
 	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
 const defaultOutboundUserAgent = "Resin/1.0"
@@ -47,6 +49,24 @@ func ApplyDialDeadline(ctx context.Context) (context.Context, context.CancelFunc
 		deadline = requested
 	}
 	return context.WithDeadline(ctx, deadline)
+}
+
+// CompleteEarlyHandshake finishes deferred protocol setup before callers cancel
+// the dial context. The setup deadline never applies to the established stream.
+func CompleteEarlyHandshake(ctx context.Context, conn net.Conn) error {
+	early, ok := common.Cast[N.EarlyConn](conn)
+	if !ok || !early.NeedHandshake() {
+		return nil
+	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	_, err := conn.Write(nil)
+	if !stop() {
+		err = ctx.Err()
+	}
+	if err != nil {
+		_ = conn.Close()
+	}
+	return err
 }
 
 // OutboundHTTPOptions controls outbound-backed HTTP execution behavior.
@@ -93,6 +113,9 @@ func HTTPGetViaOutbound(
 			dialCtx, cancel := ApplyDialDeadline(ctx)
 			defer cancel()
 			conn, err := outbound.DialContext(dialCtx, network, M.ParseSocksaddr(addr))
+			if err == nil {
+				err = CompleteEarlyHandshake(dialCtx, conn)
+			}
 			if err != nil {
 				return nil, err
 			}

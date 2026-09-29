@@ -172,6 +172,9 @@ func (p *OutboundTransportPool) newReusableOutboundTransport(ob adapter.Outbound
 			dialCtx, cancel := netutil.ApplyDialDeadline(ctx)
 			defer cancel()
 			conn, err := ob.DialContext(dialCtx, network, M.ParseSocksaddr(addr))
+			if err == nil {
+				err = netutil.CompleteEarlyHandshake(dialCtx, conn)
+			}
 			if err != nil {
 				return nil, err
 			}

@@ -184,6 +184,13 @@ func isBenignTunnelCopyError(err error) bool {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
 		return true
 	}
+	// HTTP/2 uses a private sentinel for an explicit response Body.Close.
+	// XHTTP surfaces it when closing a tunnel without half-close support.
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if cause.Error() == "http2: response body closed" {
+			return true
+		}
+	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "closed network connection")
 }

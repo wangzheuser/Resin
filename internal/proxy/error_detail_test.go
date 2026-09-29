@@ -92,6 +92,9 @@ func TestIsBenignTunnelCopyError(t *testing.T) {
 		{name: "eof", err: io.EOF, want: true},
 		{name: "net-closed", err: net.ErrClosed, want: true},
 		{name: "context-canceled", err: context.Canceled, want: true},
+		{name: "http2-body-closed", err: errors.New("http2: response body closed"), want: true},
+		{name: "http2-stream-reset", err: errors.New("http2: stream closed"), want: false},
+		{name: "unexpected-eof", err: io.ErrUnexpectedEOF, want: false},
 		{name: "closed-network-connection", err: errors.New("write tcp: use of closed network connection"), want: true},
 		{name: "generic", err: errors.New("connection reset by peer"), want: false},
 	}

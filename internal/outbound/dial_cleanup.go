@@ -5,11 +5,13 @@ import (
 	"net"
 	"sync"
 
+	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/sagernet/sing-box/adapter"
 	sbOutbound "github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/v2raywebsocket"
 	"github.com/sagernet/sing/common"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -46,12 +48,7 @@ func withDialCleanup(ctx context.Context, opts any) (context.Context, bool, erro
 	}
 	if transport != nil {
 		switch transport.Type {
-		case C.V2RayTransportTypeWebsocket:
-			// Early data defers the handshake until after DialContext returns.
-			if transport.WebsocketOptions.MaxEarlyData > 0 {
-				return ctx, false, nil
-			}
-		case C.V2RayTransportTypeHTTPUpgrade:
+		case C.V2RayTransportTypeWebsocket, C.V2RayTransportTypeHTTPUpgrade:
 		default:
 			return ctx, false, nil
 		}
@@ -167,6 +164,13 @@ func (o *cleanupOutbound) DialContext(ctx context.Context, network string, desti
 	defer stop()
 	defer attempt.finish(true)
 	conn, err := o.Outbound.DialContext(ctx, network, destination)
+	if err == nil {
+		if _, early := common.Cast[*v2raywebsocket.EarlyWebsocketConn](conn); early {
+			// Keep tracking sockets until the deferred WebSocket handshake ends.
+			// Other protocols retain their existing lazy request writes.
+			err = netutil.CompleteEarlyHandshake(ctx, conn)
+		}
+	}
 	if !stop() {
 		_ = common.Close(conn)
 		return nil, ctx.Err()

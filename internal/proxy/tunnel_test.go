@@ -1,11 +1,89 @@
 package proxy
 
 import (
+	"errors"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// XHTTP's HTTP/2 response reader reports a private error after Body.Close.
+type http2BodyCloseConn struct {
+	net.Conn
+	closed atomic.Bool
+}
+
+func (c *http2BodyCloseConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if err != nil && c.closed.Load() {
+		return n, errors.New("http2: response body closed")
+	}
+	return n, err
+}
+
+func (c *http2BodyCloseConn) Close() error {
+	c.closed.Store(true)
+	return c.Conn.Close()
+}
+
+func TestPumpPreparedTunnelReader_HTTP2BodyClose(t *testing.T) {
+	for _, response := range []bool{true, false} {
+		name := "after-response"
+		if !response {
+			name = "without-response"
+		}
+		t.Run(name, func(t *testing.T) {
+			client, clientPeer := net.Pipe()
+			upstream, upstreamPeer := net.Pipe()
+			defer client.Close()
+			defer clientPeer.Close()
+			defer upstream.Close()
+			defer upstreamPeer.Close()
+			_ = clientPeer.SetDeadline(time.Now().Add(time.Second))
+			_ = upstreamPeer.SetDeadline(time.Now().Add(time.Second))
+			resultCh := make(chan tunnelRelayResult, 1)
+			go func() {
+				resultCh <- pumpPreparedTunnelReader(client, client, &preparedTunnel{
+					upstreamConn: &http2BodyCloseConn{Conn: upstream},
+				}, tunnelPumpOptions{requireBidirectionalTraffic: true})
+			}()
+			serverDone := make(chan error, 1)
+			go func() {
+				buf := make([]byte, 7)
+				_, err := io.ReadFull(upstreamPeer, buf)
+				if err == nil && response {
+					_, err = upstreamPeer.Write([]byte("response"))
+				}
+				serverDone <- err
+			}()
+			if _, err := clientPeer.Write([]byte("request")); err != nil {
+				t.Fatal(err)
+			}
+			if response {
+				if _, err := io.ReadFull(clientPeer, make([]byte, 8)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := <-serverDone; err != nil {
+				t.Fatal(err)
+			}
+			_ = clientPeer.Close()
+			select {
+			case got := <-resultCh:
+				if got.netOK != response {
+					t.Fatalf("netOK=%v want=%v stage=%q err=%v", got.netOK, response, got.upstreamStage, got.upstreamErr)
+				}
+				if !response && got.upstreamStage != "connect_no_ingress_traffic" {
+					t.Fatalf("missing response must remain a failure: stage=%q", got.upstreamStage)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("tunnel did not finish after client close")
+			}
+		})
+	}
+}
 
 func TestPumpPreparedTunnelReader_FallsBackToFullCloseWhenHalfCloseUnavailable(t *testing.T) {
 	clientBase, clientPeer := net.Pipe()

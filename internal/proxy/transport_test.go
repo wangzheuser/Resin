@@ -3,7 +3,10 @@ package proxy
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -174,5 +177,54 @@ func TestOutboundTransportPool_DialHasDeadline(t *testing.T) {
 	}
 	if transport.TLSHandshakeTimeout <= 0 {
 		t.Fatal("TLS handshake has no timeout after HTTP transport detaches request cancellation")
+	}
+}
+
+type transportEarlyConn struct {
+	net.Conn
+	ctx   context.Context
+	ready bool
+}
+
+func (c *transportEarlyConn) NeedHandshake() bool { return !c.ready }
+func (c *transportEarlyConn) Write(p []byte) (int, error) {
+	if !c.ready {
+		if err := c.ctx.Err(); err != nil {
+			return 0, err
+		}
+		c.ready = true
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return c.Conn.Write(p)
+}
+
+func TestOutboundTransportPool_EarlyHandshakeAndReuse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+	pool := newOutboundTransportPool()
+	defer pool.CloseAll()
+	var dials atomic.Int32
+	ob := &mockOutbound{dialFunc: func(ctx context.Context, network string, dst M.Socksaddr) (net.Conn, error) {
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, network, dst.String())
+		if err != nil {
+			return nil, err
+		}
+		dials.Add(1)
+		return &transportEarlyConn{Conn: conn, ctx: ctx}, nil
+	}}
+	tr := pool.Get(node.Hash{1}, ob, nil)
+	for i := 0; i < 2; i++ {
+		body, _, err := netutil.HTTPGetViaTransport(context.Background(), tr, srv.URL, netutil.OutboundHTTPOptions{})
+		if err != nil || string(body) != "ok" {
+			t.Fatalf("request %d: body=%q err=%v", i, body, err)
+		}
+	}
+	if dials.Load() != 1 {
+		t.Fatalf("dials=%d, want reused early-data connection", dials.Load())
 	}
 }

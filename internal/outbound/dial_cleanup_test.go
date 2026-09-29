@@ -159,7 +159,7 @@ func TestOutboundFailedHandshakeClosesSocket(t *testing.T) {
 	b := newTestSingboxBuilder(t)
 	defer b.Close()
 	for _, protocol := range []string{"vless", "vmess", "trojan"} {
-		for _, mode := range []string{"tls", "tls-utls", "tls-reality", "tls-packet", "ws", "httpupgrade", "httpupgrade-timeout"} {
+		for _, mode := range []string{"tls", "tls-utls", "tls-reality", "tls-packet", "ws", "ws-early", "ws-early-timeout", "httpupgrade", "httpupgrade-timeout"} {
 			t.Run(protocol+"/"+mode, func(t *testing.T) {
 				ln, err := net.Listen("tcp", "127.0.0.1:0")
 				if err != nil {
@@ -186,7 +186,7 @@ func TestOutboundFailedHandshakeClosesSocket(t *testing.T) {
 					} else {
 						var p [4096]byte
 						_, err = conn.Read(p[:])
-						if err == nil && mode != "httpupgrade-timeout" {
+						if err == nil && !strings.HasSuffix(mode, "-timeout") {
 							_, err = io.WriteString(conn, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
 						}
 					}
@@ -194,7 +194,7 @@ func TestOutboundFailedHandshakeClosesSocket(t *testing.T) {
 						peerResult <- err
 						return
 					}
-					if mode != "httpupgrade-timeout" {
+					if !strings.HasSuffix(mode, "-timeout") {
 						_ = conn.(*net.TCPConn).CloseWrite()
 					}
 					_ = conn.SetReadDeadline(time.Now().Add(time.Second))
@@ -219,7 +219,13 @@ func TestOutboundFailedHandshakeClosesSocket(t *testing.T) {
 					}
 					opts["tls"] = tlsOpts
 				} else {
-					opts["transport"] = map[string]any{"type": strings.TrimSuffix(mode, "-timeout"), "path": "/"}
+					transport := map[string]any{"type": strings.TrimSuffix(mode, "-timeout"), "path": "/"}
+					if strings.HasPrefix(mode, "ws-early") {
+						transport["type"] = "ws"
+						transport["max_early_data"] = 2048
+						transport["early_data_header_name"] = "Sec-WebSocket-Protocol"
+					}
+					opts["transport"] = transport
 				}
 				raw, _ := json.Marshal(opts)
 				ob, err := b.Build(raw)
@@ -231,7 +237,7 @@ func TestOutboundFailedHandshakeClosesSocket(t *testing.T) {
 				}
 				defer closeOutbound(ob)
 				timeout := 2 * time.Second
-				if mode == "httpupgrade-timeout" {
+				if strings.HasSuffix(mode, "-timeout") {
 					timeout = 200 * time.Millisecond
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), timeout)
