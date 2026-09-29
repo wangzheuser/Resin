@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"net/netip"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -83,6 +84,7 @@ type ProbeManager struct {
 	periodicQueueFullLatency        atomic.Uint64
 	periodicDuplicateEgress         atomic.Uint64
 	periodicDuplicateLatency        atomic.Uint64
+	egressRecoveryNext              bool // owned by the egress scan loop
 }
 
 const (
@@ -545,6 +547,17 @@ func (m *ProbeManager) ProbeLatencySync(hash node.Hash) (*LatencyProbeResult, er
 	}, nil
 }
 
+type periodicCandidate struct {
+	hash        node.Hash
+	lastAttempt int64
+}
+
+func oldestPeriodicFirst(candidates []periodicCandidate) {
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].lastAttempt < candidates[j].lastAttempt
+	})
+}
+
 // scanEgress iterates all pool nodes and probes those due for egress check.
 func (m *ProbeManager) scanEgress() {
 	now := time.Now()
@@ -554,13 +567,11 @@ func (m *ProbeManager) scanEgress() {
 	}
 	lookahead := 15 * time.Second
 	subLookup := m.pool.MakeSubLookup()
-	queued := 0
-	batchLimit := m.periodicBatchLimit()
+	// Range has a fixed bucket order. Select across the entire due set before
+	// applying the batch cap, or early recovery nodes can starve later nodes.
+	var due [2][]periodicCandidate // healthy revalidation, circuit recovery
 
 	m.pool.Range(func(h node.Hash, entry *node.NodeEntry) bool {
-		if queued >= batchLimit {
-			return false
-		}
 		// Check stop signal.
 		select {
 		case <-m.stopCh:
@@ -587,15 +598,7 @@ func (m *ProbeManager) scanEgress() {
 					return true
 				}
 			}
-			switch m.enqueuePeriodicProbe(h, probeTaskKindEgress, probePriorityNormal) {
-			case probeEnqueueAccepted:
-				queued++
-			case probeEnqueueQueueFull:
-				m.periodicQueueFullEgress.Add(1)
-				return false
-			case probeEnqueueDuplicate:
-				m.periodicDuplicateEgress.Add(1)
-			}
+			due[1] = append(due[1], periodicCandidate{h, lastCheck})
 			return true
 		}
 
@@ -607,18 +610,40 @@ func (m *ProbeManager) scanEgress() {
 			}
 		}
 
-		switch m.enqueuePeriodicProbe(h, probeTaskKindEgress, probePriorityNormal) {
+		due[0] = append(due[0], periodicCandidate{h, lastCheck})
+		return true
+	})
+	oldestPeriodicFirst(due[0])
+	oldestPeriodicFirst(due[1])
+	// Alternate accepted tasks, including across scans when the batch is one.
+	// An empty or duplicate-only group lends its unused capacity to the other.
+	queued := 0
+	for queued < m.periodicBatchLimit() && len(due[0])+len(due[1]) > 0 {
+		select {
+		case <-m.stopCh:
+			return
+		default:
+		}
+		group := 0
+		if m.egressRecoveryNext {
+			group = 1
+		}
+		if len(due[group]) == 0 {
+			group = 1 - group
+		}
+		candidate := due[group][0]
+		due[group] = due[group][1:]
+		switch m.enqueuePeriodicProbe(candidate.hash, probeTaskKindEgress, probePriorityNormal) {
 		case probeEnqueueAccepted:
 			queued++
+			m.egressRecoveryNext = group == 0
 		case probeEnqueueQueueFull:
 			m.periodicQueueFullEgress.Add(1)
-			return false
+			return
 		case probeEnqueueDuplicate:
 			m.periodicDuplicateEgress.Add(1)
 		}
-
-		return true
-	})
+	}
 }
 
 // scanLatency iterates all pool nodes and probes those due for latency check.
@@ -638,13 +663,9 @@ func (m *ProbeManager) scanLatency() {
 	if m.latencyAuthorities != nil {
 		authorities = m.latencyAuthorities()
 	}
-	queued := 0
-	batchLimit := m.periodicBatchLimit()
+	var due []periodicCandidate
 
 	m.pool.Range(func(h node.Hash, entry *node.NodeEntry) bool {
-		if queued >= batchLimit {
-			return false
-		}
 		select {
 		case <-m.stopCh:
 			return false
@@ -669,18 +690,30 @@ func (m *ProbeManager) scanLatency() {
 			return true
 		}
 
-		switch m.enqueuePeriodicProbe(h, probeTaskKindLatency, probePriorityNormal) {
+		due = append(due, periodicCandidate{h, entry.LastLatencyProbeAttempt.Load()})
+		return true
+	})
+	oldestPeriodicFirst(due)
+	queued := 0
+	for _, candidate := range due {
+		if queued >= m.periodicBatchLimit() {
+			return
+		}
+		select {
+		case <-m.stopCh:
+			return
+		default:
+		}
+		switch m.enqueuePeriodicProbe(candidate.hash, probeTaskKindLatency, probePriorityNormal) {
 		case probeEnqueueAccepted:
 			queued++
 		case probeEnqueueQueueFull:
 			m.periodicQueueFullLatency.Add(1)
-			return false
+			return
 		case probeEnqueueDuplicate:
 			m.periodicDuplicateLatency.Add(1)
 		}
-
-		return true
-	})
+	}
 }
 
 // periodicBatchLimit keeps the scanner producer below the worker consumer.
