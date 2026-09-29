@@ -172,11 +172,21 @@ func (b *SingboxBuilder) Build(rawOptions json.RawMessage, relayPlatformIDs ...s
 	if err := sJson.UnmarshalContext(b.ctx, rawOptions, &outboundConfig); err != nil {
 		return nil, fmt.Errorf("parse outbound options: %w", err)
 	}
+	var dependencies []string
+	if options, ok := outboundConfig.Options.(option.DialerOptionsWrapper); ok {
+		if detour := options.TakeDialerOptions().Detour; detour != "" {
+			dependencies = []string{detour}
+		}
+	}
+	buildCtx, cleanup, err := withDialCleanup(b.ctx, outboundConfig.Options)
+	if err != nil {
+		return nil, fmt.Errorf("prepare outbound dialer: %w", err)
+	}
 
 	// 2. Create the outbound instance via the registry.
 	logger := b.logFactory.NewLogger("outbound/" + outboundConfig.Type)
 	ob, err := b.registry.CreateOutbound(
-		b.ctx,
+		buildCtx,
 		nil, // router — not needed for simple dialing
 		logger,
 		outboundConfig.Tag,
@@ -195,6 +205,9 @@ func (b *SingboxBuilder) Build(rawOptions json.RawMessage, relayPlatformIDs ...s
 		}
 	}
 
+	if cleanup {
+		return &cleanupOutbound{Outbound: ob, dependencies: dependencies}, nil
+	}
 	return ob, nil
 }
 

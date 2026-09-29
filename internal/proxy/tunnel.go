@@ -128,6 +128,8 @@ func prepareConnectTunnel(
 	account string,
 	target string,
 ) tunnelPrepareResult {
+	ctx, cancel := netutil.ApplyDialDeadline(ctx)
+	defer cancel()
 	if deps.bypass != nil && deps.bypass.ShouldBypass(target) {
 		return prepareDirectConnectTunnel(ctx, deps, target)
 	}
@@ -176,7 +178,13 @@ func prepareConnectTunnel(
 		rawConn, err := routed.Outbound.DialContext(ctx, "tcp", M.ParseSocksaddr(target))
 		if err == nil {
 			if earlyConn, ok := common.Cast[N.EarlyConn](rawConn); ok && earlyConn.NeedHandshake() {
+				// Protocol handshakes may block in Write after DialContext has
+				// returned. Keep the setup deadline active through this phase.
+				stop := context.AfterFunc(ctx, func() { _ = rawConn.Close() })
 				_, err = rawConn.Write(nil)
+				if !stop() {
+					err = ctx.Err()
+				}
 			}
 		}
 		if err != nil {
@@ -200,7 +208,9 @@ func prepareConnectTunnel(
 					routed.Route.EgressIP,
 				)
 			}
-			if attempt == 0 {
+			// A spent setup budget cannot try another node. Retrying here
+			// would mark that untouched node unhealthy using the old timeout.
+			if attempt == 0 && ctx.Err() == nil {
 				initialProxyErr = proxyErr
 				initialUpstreamErr = err
 				excludedEgressIPs[routed.Route.EgressIP] = struct{}{}
@@ -208,9 +218,11 @@ func prepareConnectTunnel(
 				logRouteFailover("retry", initialRoute, routing.RouteResult{}, target, detail.Kind)
 				continue
 			}
-			failed := false
-			deps.router.RecordRouteFailover(&failed)
-			logRouteFailover("failed", initialRoute, routed.Route, target, detail.Kind)
+			if attempt > 0 {
+				failed := false
+				deps.router.RecordRouteFailover(&failed)
+				logRouteFailover("failed", initialRoute, routed.Route, target, detail.Kind)
+			}
 			return tunnelPrepareResult{
 				route:         routed.Route,
 				proxyErr:      proxyErr,

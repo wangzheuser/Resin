@@ -35,17 +35,16 @@ func WithDialDeadline(ctx context.Context, deadline time.Time) context.Context {
 	return context.WithValue(ctx, dialDeadlineContextKey{}, deadline)
 }
 
-// ApplyDialDeadline restores a request deadline on a transport dial context.
+// ApplyDialDeadline restores the request deadline and caps connection setup.
+// HTTP transports detach dial cancellation, and inbound CONNECT requests may
+// have no deadline at all. This limit only covers dialing, not active streams.
 func ApplyDialDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx == nil {
-		return context.Background(), func() {}
+		ctx = context.Background()
 	}
-	deadline, ok := ctx.Value(dialDeadlineContextKey{}).(time.Time)
-	if !ok || deadline.IsZero() {
-		return ctx, func() {}
-	}
-	if current, ok := ctx.Deadline(); ok && !deadline.Before(current) {
-		return ctx, func() {}
+	deadline := time.Now().Add(15 * time.Second)
+	if requested, ok := ctx.Value(dialDeadlineContextKey{}).(time.Time); ok && !requested.IsZero() && requested.Before(deadline) {
+		deadline = requested
 	}
 	return context.WithDeadline(ctx, deadline)
 }
@@ -78,7 +77,7 @@ func HTTPGetViaTransport(
 }
 
 // HTTPGetViaOutbound executes an HTTP GET through the provided outbound.
-// Timeout and cancellation are controlled solely by ctx.
+// ctx controls request cancellation; connection setup is capped at 15 seconds.
 func HTTPGetViaOutbound(
 	ctx context.Context,
 	outbound adapter.Outbound,
