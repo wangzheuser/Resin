@@ -1596,6 +1596,34 @@ a {
   white-space: nowrap;
 }
 
+.subscription-health-cell {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 15rem;
+  font-size: 0.75rem;
+}
+
+.subscription-health-cell span,
+.subscription-health-hint {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.subscription-probe-panel {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+}
+
+.subscription-probe-panel progress {
+  width: 100%;
+  margin-block: 0.5rem;
+}
+
 .subscription-route-chip {
   display: inline-flex;
   align-items: center;

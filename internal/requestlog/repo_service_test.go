@@ -12,6 +12,21 @@ import (
 
 func ptrInt(v int) *int { return &v }
 
+func TestService_QueueObservabilityTracksDepthAndDrops(t *testing.T) {
+	svc := NewService(ServiceConfig{QueueSize: 1})
+	svc.EmitRequestLog(proxy.RequestLogEntry{ID: "queued"})
+	svc.EmitRequestLog(proxy.RequestLogEntry{ID: "dropped"})
+	if got := svc.QueueCapacity(); got != 1 {
+		t.Fatalf("queue capacity: got %d, want 1", got)
+	}
+	if got := svc.QueueDepth(); got != 1 {
+		t.Fatalf("queue depth: got %d, want 1", got)
+	}
+	if got := svc.DroppedCount(); got != 1 {
+		t.Fatalf("dropped count: got %d, want 1", got)
+	}
+}
+
 func TestRepo_InsertListGetPayloads(t *testing.T) {
 	repo := NewRepo(t.TempDir(), 1<<20, 5)
 	if err := repo.Open(); err != nil {

@@ -37,7 +37,11 @@ func newTestServer() *Server {
 		ResourceFetchTimeout:                            30 * time.Second,
 		ProxyTransportMaxIdleConns:                      1024,
 		ProxyTransportMaxIdleConnsPerHost:               64,
+		ProxyTransportMaxTransports:                     256,
 		ProxyTransportIdleConnTimeout:                   90 * time.Second,
+		ProxyConnectIdleTimeout:                         time.Minute,
+		ProxyConnectMaxLifetime:                         30 * time.Minute,
+		MaxInboundConnections:                           256,
 		ProxyBypassRules:                                []string{"localhost", "127.*"},
 		RequestLogQueueSize:                             8192,
 		RequestLogQueueFlushBatchSize:                   4096,
@@ -323,6 +327,12 @@ func TestSystemEnvConfig_OK(t *testing.T) {
 	}
 	if body["probe_timeout"] != "15s" {
 		t.Errorf("probe_timeout: got %q, want %q", body["probe_timeout"], "15s")
+	}
+	if body["max_inbound_connections"] != float64(256) || body["proxy_transport_max_transports"] != float64(256) {
+		t.Errorf("runtime limits missing: inbound=%v transports=%v", body["max_inbound_connections"], body["proxy_transport_max_transports"])
+	}
+	if body["request_log_dropped_count"] != float64(0) || body["request_log_queue_depth"] != float64(0) {
+		t.Errorf("request log stats missing: dropped=%v depth=%v", body["request_log_dropped_count"], body["request_log_queue_depth"])
 	}
 	if body["admin_token_set"] != true {
 		t.Errorf("admin_token_set: got %v, want true", body["admin_token_set"])

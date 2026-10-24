@@ -3,9 +3,36 @@ package proxy
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
+	"strings"
 	"testing"
 )
+
+func TestCanRetryForwardRequest(t *testing.T) {
+	failedBeforeWrite := newUpstreamRequestTrace()
+	if !canRetryForwardRequest(httptest.NewRequest(http.MethodGet, "http://example.com", nil), failedBeforeWrite) {
+		t.Fatal("GET that failed before upstream write should be retryable")
+	}
+
+	wrote := newUpstreamRequestTrace()
+	wrote.clientTrace().GotConn(httptrace.GotConnInfo{})
+	if canRetryForwardRequest(httptest.NewRequest(http.MethodGet, "http://example.com", nil), wrote) {
+		t.Fatal("partial request writes must not be replayed")
+	}
+	wrote.clientTrace().WroteRequest(httptrace.WroteRequestInfo{})
+	if canRetryForwardRequest(httptest.NewRequest(http.MethodGet, "http://example.com", nil), wrote) {
+		t.Fatal("request reported as written must not be replayed")
+	}
+
+	post := httptest.NewRequest(http.MethodPost, "http://example.com", io.NopCloser(strings.NewReader("body")))
+	post.ContentLength = 4
+	if canRetryForwardRequest(post, failedBeforeWrite) {
+		t.Fatal("POST with a body must not be replayed")
+	}
+}
 
 func TestShouldRecordForwardCopyFailure(t *testing.T) {
 	t.Run("NilError", func(t *testing.T) {

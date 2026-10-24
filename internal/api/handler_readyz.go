@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"sync/atomic"
 
 	"github.com/Resinat/Resin/internal/config"
@@ -14,7 +15,8 @@ const (
 )
 
 // HandleReadyz reports whether the node pool is ready to receive traffic.
-// It exposes aggregate counts only; credentials and node details stay private.
+// With platform_id it evaluates the platform's routable view; without it the
+// legacy global aggregate is retained.
 func HandleReadyz(manager *metrics.Manager, runtimeCfg *atomic.Pointer[config.RuntimeConfig]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		minHealthyNodeRatio := defaultReadyMinHealthyNodeRatio
@@ -44,10 +46,34 @@ func HandleReadyz(manager *metrics.Manager, runtimeCfg *atomic.Pointer[config.Ru
 			})
 			return
 		}
+		platformID := strings.TrimSpace(r.URL.Query().Get("platform_id"))
+		scope := "global"
 		totalNodes := stats.TotalNodes()
 		healthyNodes := stats.HealthyNodes()
 		egressIPs := stats.EgressIPCount()
 		healthyEgressIPs := stats.UniqueHealthyEgressIPCount()
+		if platformID != "" {
+			routableNodes, nodesOK := stats.RoutableNodeCount(platformID)
+			platformEgressIPs, egressOK := stats.PlatformEgressIPCount(platformID)
+			if !nodesOK || !egressOK {
+				WriteJSON(w, http.StatusServiceUnavailable, map[string]any{
+					"status":      "not_ready",
+					"scope":       "platform",
+					"platform_id": platformID,
+					"reasons":     []string{"platform_not_found"},
+					"thresholds": map[string]float64{
+						"healthy_node_ratio":      minHealthyNodeRatio,
+						"healthy_egress_ip_ratio": minHealthyEgressRatio,
+					},
+				})
+				return
+			}
+			// RoutableNodeCount and PlatformEgressIPCount are already scoped to
+			// the platform's eligible view, so both totals are healthy counts.
+			scope = "platform"
+			totalNodes, healthyNodes = routableNodes, routableNodes
+			egressIPs, healthyEgressIPs = platformEgressIPs, platformEgressIPs
+		}
 		nodeRatio := 0.0
 		egressRatio := 0.0
 		if totalNodes > 0 {
@@ -76,6 +102,8 @@ func HandleReadyz(manager *metrics.Manager, runtimeCfg *atomic.Pointer[config.Ru
 		}
 		WriteJSON(w, status, map[string]any{
 			"status":                  state,
+			"scope":                   scope,
+			"platform_id":             platformID,
 			"total_nodes":             totalNodes,
 			"healthy_nodes":           healthyNodes,
 			"egress_ips":              egressIPs,

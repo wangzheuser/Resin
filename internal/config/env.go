@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/Resinat/Resin/internal/platform"
 	"github.com/robfig/cron/v3"
 )
@@ -41,6 +42,7 @@ type EnvConfig struct {
 	DefaultPlatformAllocationPolicy                 string
 	ProbeTimeout                                    time.Duration
 	ResourceFetchTimeout                            time.Duration
+	SubscriptionProxyURL                            string
 	NodeDNSUpstreams                                []string
 	ProxyTransportMaxIdleConns                      int
 	ProxyTransportMaxIdleConnsPerHost               int
@@ -125,6 +127,10 @@ func LoadEnvConfig() (*EnvConfig, error) {
 		string(platform.AllocationPolicyBalanced),
 	)
 	cfg.ProbeTimeout = envDuration("RESIN_PROBE_TIMEOUT", 15*time.Second, &errs)
+	cfg.SubscriptionProxyURL = strings.TrimSpace(os.Getenv("RESIN_SUBSCRIPTION_PROXY_URL"))
+	if err := netutil.ValidateSubscriptionProxy(cfg.SubscriptionProxyURL); err != nil {
+		errs = append(errs, err.Error())
+	}
 	cfg.ResourceFetchTimeout = envDuration("RESIN_RESOURCE_FETCH_TIMEOUT", 30*time.Second, &errs)
 	cfg.NodeDNSUpstreams = envStringSlice("RESIN_NODE_DNS_UPSTREAMS", DefaultNodeDNSUpstreams(), &errs)
 	cfg.ProxyTransportMaxIdleConns = envInt("RESIN_PROXY_TRANSPORT_MAX_IDLE_CONNS", 1024, &errs)

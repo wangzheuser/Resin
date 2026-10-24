@@ -342,16 +342,18 @@ func bulkExecRows[T any](
 
 // FlushOps holds all upsert/delete slices for a single-transaction cache flush.
 type FlushOps struct {
-	UpsertNodesStatic       []model.NodeStatic
-	DeleteNodesStatic       []string
-	UpsertSubscriptionNodes []model.SubscriptionNode
-	DeleteSubscriptionNodes []model.SubscriptionNodeKey
-	UpsertNodesDynamic      []model.NodeDynamic
-	DeleteNodesDynamic      []string
-	UpsertNodeLatency       []model.NodeLatency
-	DeleteNodeLatency       []model.NodeLatencyKey
-	UpsertLeases            []model.Lease
-	DeleteLeases            []model.LeaseKey
+	UpsertSubscriptionRefresh []model.SubscriptionRefresh
+	DeleteSubscriptionRefresh []string
+	UpsertNodesStatic         []model.NodeStatic
+	DeleteNodesStatic         []string
+	UpsertSubscriptionNodes   []model.SubscriptionNode
+	DeleteSubscriptionNodes   []model.SubscriptionNodeKey
+	UpsertNodesDynamic        []model.NodeDynamic
+	DeleteNodesDynamic        []string
+	UpsertNodeLatency         []model.NodeLatency
+	DeleteNodeLatency         []model.NodeLatencyKey
+	UpsertLeases              []model.Lease
+	DeleteLeases              []model.LeaseKey
 }
 
 // FlushTx executes all upserts and deletes in a single transaction.
@@ -411,6 +413,11 @@ func (r *CacheRepo) FlushTx(ops FlushOps) error {
 			_, err := s.Exec(l.PlatformID, l.Account, l.NodeHash, l.EgressIP, l.CreatedAtNs, l.ExpiryNs, l.LastAccessedNs)
 			return err
 		}},
+		{"upsert_subscription_refresh", "INSERT INTO subscription_refresh(subscription_id,state_json) VALUES (?,?) ON CONFLICT(subscription_id) DO UPDATE SET state_json=excluded.state_json", len(ops.UpsertSubscriptionRefresh), func(s *sql.Stmt, i int) error {
+			_, err := s.Exec(ops.UpsertSubscriptionRefresh[i].SubscriptionID, ops.UpsertSubscriptionRefresh[i].StateJSON)
+			return err
+		}},
+		{"delete_subscription_refresh", "DELETE FROM subscription_refresh WHERE subscription_id=?", len(ops.DeleteSubscriptionRefresh), func(s *sql.Stmt, i int) error { _, err := s.Exec(ops.DeleteSubscriptionRefresh[i]); return err }},
 		// Deletes in reverse dependency order.
 		{"delete_leases", deleteLeasesSQL, len(ops.DeleteLeases), func(s *sql.Stmt, i int) error {
 			_, err := s.Exec(ops.DeleteLeases[i].PlatformID, ops.DeleteLeases[i].Account)
@@ -493,3 +500,20 @@ const (
 	deleteLeasesSQL            = "DELETE FROM leases WHERE platform_id = ? AND account = ?"
 	deleteSubscriptionNodesSQL = "DELETE FROM subscription_nodes WHERE subscription_id = ? AND node_hash = ?"
 )
+
+func (r *CacheRepo) LoadSubscriptionRefresh() ([]model.SubscriptionRefresh, error) {
+	rows, err := r.db.Query("SELECT subscription_id,state_json FROM subscription_refresh")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []model.SubscriptionRefresh
+	for rows.Next() {
+		var item model.SubscriptionRefresh
+		if err := rows.Scan(&item.SubscriptionID, &item.StateJSON); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}

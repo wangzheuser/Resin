@@ -355,9 +355,10 @@ func newTopologyRuntime(
 	log.Println("ProbeManager initialized")
 
 	scheduler := topology.NewSubscriptionScheduler(topology.SchedulerConfig{
-		SubManager: subManager,
-		Pool:       pool,
-		Downloader: downloader,
+		SubManager:   subManager,
+		Pool:         pool,
+		Downloader:   downloader,
+		OnSubUpdated: func(sub *subscription.Subscription) { engine.MarkSubscriptionRefresh(sub.ID) },
 		OnSubReenabledNode: func(hash node.Hash) {
 			outboundMgr.EnsureNodeOutbound(hash)
 			probeMgr.TriggerImmediateEgressProbe(hash)
@@ -450,6 +451,7 @@ func bootstrapTopology(
 	for _, ms := range dbSubs {
 		sub := subscription.NewSubscription(ms.ID, ms.Name, ms.URL, ms.Enabled, ms.Ephemeral)
 		sub.SetFetchConfig(ms.URL, ms.UpdateIntervalNs)
+		sub.SetDownloadConfig(ms.DownloadMode, ms.DownloadPlatformID)
 		sub.SetSourceType(ms.SourceType)
 		sub.SetContent(ms.Content)
 		sub.SetRelayPlatformID(ms.RelayPlatformID)
@@ -458,6 +460,18 @@ func bootstrapTopology(
 		sub.CreatedAtNs = ms.CreatedAtNs
 		sub.UpdatedAtNs = ms.UpdatedAtNs
 		subManager.Register(sub)
+	}
+	history, err := engine.LoadSubscriptionRefresh()
+	if err != nil {
+		return fmt.Errorf("load subscription refresh history: %w", err)
+	}
+	for _, row := range history {
+		if sub := subManager.Lookup(row.SubscriptionID); sub != nil {
+			var history subscription.RefreshState
+			if json.Unmarshal([]byte(row.StateJSON), &history) == nil {
+				sub.RestoreRefreshState(history)
+			}
+		}
 	}
 	log.Printf("Loaded %d subscriptions from state.db", len(dbSubs))
 
@@ -627,6 +641,17 @@ func newFlushReaders(
 		},
 		ReadLease: func(key model.LeaseKey) *model.Lease {
 			return router.ReadLease(key)
+		},
+		ReadSubscriptionRefresh: func(id string) *model.SubscriptionRefresh {
+			sub := subManager.Lookup(id)
+			if sub == nil {
+				return nil
+			}
+			data, err := json.Marshal(sub.RefreshSnapshot())
+			if err != nil {
+				return nil
+			}
+			return &model.SubscriptionRefresh{SubscriptionID: id, StateJSON: string(data)}
 		},
 		ReadSubscriptionNode: func(key model.SubscriptionNodeKey) *model.SubscriptionNode {
 			h, err := node.ParseHex(key.NodeHash)

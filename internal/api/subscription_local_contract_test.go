@@ -78,12 +78,16 @@ func TestAPIContract_SubscriptionListCanExcludeContent(t *testing.T) {
 	}
 	defaultListRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/subscriptions", nil, true)
 	defaultItems, _ := decodeJSONMap(t, defaultListRec)["items"].([]any)
-	if content := defaultItems[0].(map[string]any)["content"]; content != "vmess://example" {
-		t.Fatalf("default list subscription content: got %v, want %q", content, "vmess://example")
+	if content := defaultItems[0].(map[string]any)["content"]; content != "" {
+		t.Fatalf("default list subscription content: got %v, want empty", content)
 	}
 
 	getRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/subscriptions/"+subID, nil, true)
-	if content := decodeJSONMap(t, getRec)["content"]; content != "vmess://example" {
-		t.Fatalf("get subscription content: got %v, want %q", content, "vmess://example")
+	if content := decodeJSONMap(t, getRec)["content"]; content != "" {
+		t.Fatalf("get subscription content: got %v, want empty", content)
+	}
+	getContentRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/subscriptions/"+subID+"?include_content=true", nil, true)
+	if content := decodeJSONMap(t, getContentRec)["content"]; content != "vmess://example" {
+		t.Fatalf("get subscription content with opt-in: got %v, want %q", content, "vmess://example")
 	}
 }

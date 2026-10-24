@@ -117,10 +117,15 @@ type Subscription struct {
 	opMu sync.Mutex
 
 	// Mutable fields guarded by mu.
-	mu         sync.RWMutex
-	url        string
-	sourceType string
-	content    string
+	mu                 sync.RWMutex
+	refreshMu          sync.RWMutex
+	refreshState       RefreshState
+	refreshActivity    string
+	downloadMode       string
+	downloadPlatformID string
+	url                string
+	sourceType         string
+	content            string
 	// relayPlatformID selects the Platform whose direct nodes provide the
 	// subscription's single-hop relay. Empty means direct dialing.
 	relayPlatformID string
@@ -307,6 +312,9 @@ func (s *Subscription) Enabled() bool {
 // SetEnabled updates the enabled flag (thread-safe).
 func (s *Subscription) SetEnabled(v bool) {
 	s.mu.Lock()
+	if s.enabled != v {
+		s.configVersion.Add(1)
+	}
 	s.enabled = v
 	s.mu.Unlock()
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"runtime"
 	"sync"
 	"time"
 
@@ -14,15 +13,17 @@ import (
 	"github.com/Resinat/Resin/internal/subscription"
 )
 
-const schedulerLookahead = 15 * time.Second
-
 // SubscriptionScheduler manages periodic subscription updates.
 type SubscriptionScheduler struct {
-	subManager     *SubscriptionManager
-	pool           *GlobalNodePool
-	downloader     netutil.Downloader
-	downloadCtx    context.Context
-	cancelDownload context.CancelFunc
+	subManager             *SubscriptionManager
+	pool                   *GlobalNodePool
+	downloader             netutil.Downloader
+	downloadCtx            context.Context
+	cancelDownload         context.CancelFunc
+	refreshes              refreshCoordinator
+	maxRefreshes           int
+	maxHostRefreshes       int
+	subscriptionDownloader *netutil.SubscriptionDownloader
 
 	// Fetcher fetches subscription data from a URL.
 	// Defaults to downloader.Download; injectable for testing.
@@ -40,11 +41,14 @@ type SubscriptionScheduler struct {
 
 // SchedulerConfig configures the SubscriptionScheduler.
 type SchedulerConfig struct {
-	SubManager   *SubscriptionManager
-	Pool         *GlobalNodePool
-	Downloader   netutil.Downloader               // shared downloader
-	Fetcher      func(url string) ([]byte, error) // optional, defaults to Downloader.Download
-	OnSubUpdated func(sub *subscription.Subscription)
+	SubscriptionDownloader     *netutil.SubscriptionDownloader
+	MaxConcurrentRefreshes     int
+	MaxConcurrentHostRefreshes int
+	SubManager                 *SubscriptionManager
+	Pool                       *GlobalNodePool
+	Downloader                 netutil.Downloader               // shared downloader
+	Fetcher                    func(url string) ([]byte, error) // optional, defaults to Downloader.Download
+	OnSubUpdated               func(sub *subscription.Subscription)
 	// OnSubReenabledNode is fired after false->true enabled transition.
 	OnSubReenabledNode func(hash node.Hash)
 }
@@ -53,14 +57,24 @@ type SchedulerConfig struct {
 func NewSubscriptionScheduler(cfg SchedulerConfig) *SubscriptionScheduler {
 	downloadCtx, cancelDownload := context.WithCancel(context.Background())
 	sched := &SubscriptionScheduler{
-		subManager:         cfg.SubManager,
-		pool:               cfg.Pool,
-		downloader:         cfg.Downloader,
-		downloadCtx:        downloadCtx,
-		cancelDownload:     cancelDownload,
-		onSubUpdated:       cfg.OnSubUpdated,
-		onSubReenabledNode: cfg.OnSubReenabledNode,
-		stopCh:             make(chan struct{}),
+		subManager:             cfg.SubManager,
+		pool:                   cfg.Pool,
+		downloader:             cfg.Downloader,
+		downloadCtx:            downloadCtx,
+		cancelDownload:         cancelDownload,
+		onSubUpdated:           cfg.OnSubUpdated,
+		onSubReenabledNode:     cfg.OnSubReenabledNode,
+		stopCh:                 make(chan struct{}),
+		refreshes:              newRefreshCoordinator(),
+		maxRefreshes:           cfg.MaxConcurrentRefreshes,
+		maxHostRefreshes:       cfg.MaxConcurrentHostRefreshes,
+		subscriptionDownloader: cfg.SubscriptionDownloader,
+	}
+	if sched.maxRefreshes <= 0 {
+		sched.maxRefreshes = 4
+	}
+	if sched.maxHostRefreshes <= 0 {
+		sched.maxHostRefreshes = 2
 	}
 	if cfg.Fetcher != nil {
 		sched.Fetcher = cfg.Fetcher
@@ -72,7 +86,13 @@ func NewSubscriptionScheduler(cfg SchedulerConfig) *SubscriptionScheduler {
 
 // Start launches the background scheduler goroutine.
 func (s *SubscriptionScheduler) Start() {
+	s.refreshes.Lock()
+	if s.refreshes.closed {
+		s.refreshes.Unlock()
+		return
+	}
 	s.wg.Add(1)
+	s.refreshes.Unlock()
 	go func() {
 		defer s.wg.Done()
 		scanloop.Run(s.stopCh, scanloop.DefaultMinInterval, scanloop.DefaultJitterRange, s.tick)
@@ -81,7 +101,14 @@ func (s *SubscriptionScheduler) Start() {
 
 // Stop signals the scheduler to stop and waits for it to finish.
 func (s *SubscriptionScheduler) Stop() {
+	s.refreshes.Lock()
+	if s.refreshes.closed {
+		s.refreshes.Unlock()
+		return
+	}
+	s.refreshes.closed = true
 	close(s.stopCh)
+	s.refreshes.Unlock()
 	s.cancelDownload()
 	s.wg.Wait()
 }
@@ -115,7 +142,13 @@ func (s *SubscriptionScheduler) ForceRefreshAll() {
 // ForceRefreshAllAsync triggers ForceRefreshAll in a background goroutine.
 // The goroutine is tracked by scheduler waitgroup so Stop() waits for exit.
 func (s *SubscriptionScheduler) ForceRefreshAllAsync() {
+	s.refreshes.Lock()
+	if s.refreshes.closed {
+		s.refreshes.Unlock()
+		return
+	}
 	s.wg.Add(1)
+	s.refreshes.Unlock()
 	go func() {
 		defer s.wg.Done()
 		s.ForceRefreshAll()
@@ -140,65 +173,52 @@ func (s *SubscriptionScheduler) tick() {
 		if !sub.Enabled() {
 			return true
 		}
-		// Check if due: lastChecked + interval - lookahead <= now.
-		if sub.LastCheckedNs.Load()+sub.UpdateIntervalNs()-int64(schedulerLookahead) <= now {
+		// Retry-After and failure backoff are exact lower bounds.
+		if sub.RefreshDue(time.Unix(0, now)) {
 			dueSubs = append(dueSubs, sub)
 		}
 		return true
 	})
-	s.runUpdatesWithWorkerLimit(dueSubs)
+	s.runRefreshesAsync(dueSubs, false)
 }
 
 func (s *SubscriptionScheduler) runUpdatesWithWorkerLimit(subs []*subscription.Subscription) {
-	if len(subs) == 0 {
-		return
-	}
+	s.runRefreshes(subs, true)
+}
 
-	workers := runtime.GOMAXPROCS(0)
-	if workers < 1 {
-		workers = 1
-	}
-	if workers > len(subs) {
-		workers = len(subs)
-	}
-
-	sem := make(chan struct{}, workers)
+func (s *SubscriptionScheduler) runRefreshes(subs []*subscription.Subscription, force bool) {
 	var wg sync.WaitGroup
 	for _, sub := range subs {
-		select {
-		case <-s.stopCh:
-			wg.Wait()
-			return
-		default:
-		}
-
-		sem <- struct{}{}
 		wg.Add(1)
 		go func(sub *subscription.Subscription) {
 			defer wg.Done()
-			defer func() { <-sem }()
-			select {
-			case <-s.stopCh:
-				return
-			default:
-			}
-			s.UpdateSubscription(sub)
+			_ = s.refresh(context.Background(), sub, force)
 		}(sub)
 	}
 	wg.Wait()
 }
 
+func (s *SubscriptionScheduler) runRefreshesAsync(subs []*subscription.Subscription, force bool) {
+	for _, sub := range subs {
+		// Start only new flights. Joining an existing flight would create a
+		// blocked waiter goroutine for every periodic scan of the same sub.
+		_, _ = s.startRefresh(context.Background(), sub, force)
+	}
+}
+
 // UpdateSubscription fetches and parses outside the lock, then diffs and
 // applies the result under WithSubLock. This keeps the lock scope narrow
 // (no I/O under lock) while still preventing concurrent diff/apply races.
-func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscription) {
+func (s *SubscriptionScheduler) updateSubscription(ctx context.Context, sub *subscription.Subscription) error {
+	var attempts []netutil.DownloadAttempt
 	attemptStartedNs := time.Now().UnixNano()
 	attemptSeq := sub.NextAttemptSeq()
-	attemptURL := sub.URL()
-	attemptSourceType := sub.SourceType()
-	attemptContent := sub.Content()
-	attemptRelayPlatformID := sub.RelayPlatformID()
-	attemptConfigVersion := sub.ConfigVersion()
+	inputs := sub.FetchInputs()
+	attemptURL := inputs.URL
+	attemptSourceType := inputs.Source
+	attemptContent := inputs.Content
+	attemptRelayPlatformID := inputs.RelayPlatformID
+	attemptConfigVersion := inputs.Version
 
 	// 1. Fetch/read content (lock-free).
 	var (
@@ -208,22 +228,26 @@ func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscriptio
 	if attemptSourceType == subscription.SourceTypeLocal {
 		body = []byte(attemptContent)
 	} else {
-		body, err = s.Fetcher(attemptURL)
+		if s.subscriptionDownloader != nil {
+			body, attempts, err = s.subscriptionDownloader.DownloadSubscription(ctx, attemptURL, inputs.DownloadMode, inputs.DownloadPlatformID)
+		} else {
+			body, err = s.Fetcher(attemptURL)
+		}
 		if err != nil {
-			s.handleUpdateFailure(sub, attemptStartedNs, attemptSeq, attemptConfigVersion, "fetch", err)
-			return
+			s.handleUpdateFailure(sub, attemptStartedNs, attemptSeq, attemptConfigVersion, "fetch", err, attempts)
+			return err
 		}
 	}
 
 	// 2. Parse (lock-free).
 	parsed, err := subscription.ParseGeneralSubscription(body)
 	if err != nil {
-		s.handleUpdateFailure(sub, attemptStartedNs, attemptSeq, attemptConfigVersion, "parse", err)
-		return
+		s.handleUpdateFailure(sub, attemptStartedNs, attemptSeq, attemptConfigVersion, "parse", err, attempts)
+		return &netutil.SubscriptionFetchError{Kind: "parse", Message: "subscription content could not be parsed"}
 	}
 	if len(parsed) == 0 {
-		s.handleUpdateFailure(sub, attemptStartedNs, attemptSeq, attemptConfigVersion, "parse", errors.New("subscription parsed zero supported nodes"))
-		return
+		s.handleUpdateFailure(sub, attemptStartedNs, attemptSeq, attemptConfigVersion, "parse", errors.New("subscription parsed zero supported nodes"), attempts)
+		return &netutil.SubscriptionFetchError{Kind: "parse", Message: "subscription parsed zero supported nodes"}
 	}
 
 	// 3. Build refreshed managed nodes map (lock-free, pure computation).
@@ -243,7 +267,7 @@ func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscriptio
 	applied := false
 	sub.WithOpLock(func() {
 		// If refresh-input config changed while this attempt was in-flight, discard.
-		if sub.ConfigVersion() != attemptConfigVersion {
+		if sub.ConfigVersion() != attemptConfigVersion || !sub.Enabled() || s.subManager.Lookup(sub.ID) != sub || ctx.Err() != nil {
 			return
 		}
 		// Stale success guard: if a newer successful update has already landed,
@@ -336,17 +360,18 @@ func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscriptio
 		sub.LastCheckedNs.Store(now)
 		sub.LastUpdatedNs.Store(now)
 		sub.MarkAppliedAttempt(attemptSeq)
-		sub.SetLastError("")
+		sub.RestoreRefreshState(subscription.RefreshState{LastCheckedNs: now, LastUpdatedNs: now, NextRefreshNs: now + sub.UpdateIntervalNs(), Attempts: attempts})
 		applied = true
 	})
 	if !applied {
 		log.Printf("[scheduler] stale success ignored for %s", sub.ID)
-		return
+		return errRefreshSuperseded
 	}
 
 	if s.onSubUpdated != nil {
 		s.onSubUpdated(sub)
 	}
+	return nil
 }
 
 // handleUpdateFailure applies a fetch/parse failure to subscription state.
@@ -367,20 +392,28 @@ func (s *SubscriptionScheduler) handleUpdateFailure(
 	attemptConfigVersion int64,
 	stage string,
 	err error,
+	attempts []netutil.DownloadAttempt,
 ) {
+	if errors.Is(err, context.Canceled) || s.downloadCtx.Err() != nil {
+		return
+	}
+	if stage == "parse" {
+		err = &netutil.SubscriptionFetchError{Kind: "parse", Message: "subscription content has no valid supported nodes"}
+		if s.subscriptionDownloader != nil {
+			s.subscriptionDownloader.Invalidate()
+		}
+	}
 	safeMessage := netutil.RedactErrorMessage(err.Error())
 	applied := false
 	sub.WithOpLock(func() {
 		// If refresh-input config changed while this attempt was in-flight, discard.
-		if sub.ConfigVersion() != attemptConfigVersion {
+		if sub.ConfigVersion() != attemptConfigVersion || !sub.Enabled() || s.subManager.Lookup(sub.ID) != sub {
 			return
 		}
 		if sub.LastAppliedSeq() > attemptSeq {
 			return
 		}
-		now := time.Now().UnixNano()
-		sub.LastCheckedNs.Store(now)
-		sub.SetLastError(safeMessage)
+		s.recordRefreshFailure(sub, err, attempts)
 		applied = true
 	})
 	if !applied {
@@ -419,6 +452,7 @@ func (s *SubscriptionScheduler) SetSubscriptionEnabled(sub *subscription.Subscri
 
 		sub.SetEnabled(enabled)
 	})
+	s.CancelRefresh(sub)
 	// Rebuild all platform views so they pick up the visibility change.
 	s.pool.RebuildAllPlatforms()
 

@@ -66,7 +66,9 @@ type ControlPlaneService struct {
 	configVersion int
 	// relayReferenceMu keeps Platform deletion atomic with subscription relay
 	// reference creation and replacement.
-	relayReferenceMu sync.RWMutex
+	relayReferenceMu    sync.RWMutex
+	subscriptionProbeMu sync.Mutex
+	subscriptionProbe   *subscriptionProbeJob
 }
 
 // ------------------------------------------------------------------
@@ -108,6 +110,7 @@ var platformPatchAllowedFields = map[string]bool{
 }
 
 var subscriptionPatchAllowedFields = map[string]bool{
+	"download_mode": true, "download_platform_id": true,
 	"name":                       true,
 	"url":                        true,
 	"content":                    true,

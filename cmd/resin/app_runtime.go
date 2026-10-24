@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -27,6 +28,7 @@ import (
 	"github.com/Resinat/Resin/internal/routing"
 	"github.com/Resinat/Resin/internal/service"
 	"github.com/Resinat/Resin/internal/state"
+	"github.com/Resinat/Resin/internal/subscription"
 )
 
 type resinApp struct {
@@ -240,6 +242,42 @@ func (a *resinApp) wireRetryDownloader(retryDL *netutil.RetryDownloader) {
 		return body, err
 	}
 	log.Println("RetryDownloader wiring complete")
+	a.topoRuntime.scheduler.SetSubscriptionDownloader(&netutil.SubscriptionDownloader{
+		Timeout:          func() time.Duration { return a.envCfg.ResourceFetchTimeout },
+		UserAgent:        currentDownloadUserAgent,
+		ExternalProxyURL: a.envCfg.SubscriptionProxyURL,
+		Pick: func(target, platformID string, hashes map[node.Hash]struct{}, ips map[netip.Addr]struct{}) (netutil.DownloadRoute, error) {
+			name := ""
+			if platformID != "" {
+				p, ok := a.topoRuntime.pool.GetPlatform(platformID)
+				if !ok {
+					return netutil.DownloadRoute{}, errors.New("download platform not found")
+				}
+				name = p.Name
+			}
+			for i := 0; i < 8; i++ {
+				res, err := a.topoRuntime.router.RouteRequestExcluding(name, "", target, ips)
+				if err != nil {
+					return netutil.DownloadRoute{}, err
+				}
+				if _, exists := hashes[res.NodeHash]; !exists {
+					return netutil.DownloadRoute{Hash: res.NodeHash, EgressIP: res.EgressIP}, nil
+				}
+			}
+			return netutil.DownloadRoute{}, errors.New("distinct download routes exhausted")
+		},
+		Fetch: retryDL.ProxyFetch,
+		ValidateBody: func(body []byte) error {
+			parsed, err := subscription.ParseGeneralSubscription(body)
+			if err != nil {
+				return err
+			}
+			if len(parsed) == 0 {
+				return errors.New("subscription parsed zero supported nodes")
+			}
+			return nil
+		},
+	})
 }
 
 func (a *resinApp) bootstrapFromPersistence(engine *state.StateEngine) error {
@@ -366,10 +404,9 @@ func (a *resinApp) startBackgroundServices() {
 	a.topoRuntime.ephemeralCleaner.Start()
 	log.Println("Ephemeral cleaner started (batch 2)")
 
-	// --- Step 8 Batch 3: Subscription scheduler (force full refresh on start) ---
+	// --- Step 8 Batch 3: Subscription scheduler ---
 	a.topoRuntime.scheduler.Start()
-	a.topoRuntime.scheduler.ForceRefreshAllAsync()
-	log.Println("Subscription scheduler started; forced full refresh running in background (batch 3)")
+	log.Println("Subscription scheduler started; due subscriptions will be refreshed (batch 3)")
 }
 
 func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
@@ -405,6 +442,7 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 		int64(a.envCfg.APIMaxBodyBytes),
 		a.requestlogRepo,
 		a.metricsManager,
+		a.requestlogSvc,
 	)
 	proxyEvents := a.buildProxyEvents()
 	outboundTransportCfg := outboundTransportConfig(a.envCfg)

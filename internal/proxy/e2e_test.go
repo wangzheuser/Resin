@@ -1086,6 +1086,9 @@ func TestForwardProxy_CONNECTZeroTrafficMarkedFailed(t *testing.T) {
 		if logEv.UpstreamStage != "connect_zero_traffic" {
 			t.Fatalf("CONNECT zero-traffic upstream_stage: got %q, want %q", logEv.UpstreamStage, "connect_zero_traffic")
 		}
+		if logEv.UpstreamErrKind != "zero_traffic" {
+			t.Fatalf("CONNECT zero-traffic failure kind: got %q, want %q", logEv.UpstreamErrKind, "zero_traffic")
+		}
 		if logEv.EgressBytes != 0 || logEv.IngressBytes != 0 {
 			t.Fatalf("CONNECT zero-traffic bytes: ingress=%d egress=%d, want both 0", logEv.IngressBytes, logEv.EgressBytes)
 		}
@@ -1191,6 +1194,9 @@ func TestForwardProxy_CONNECTHalfTrafficNotMarkedZeroTraffic(t *testing.T) {
 		}
 		if logEv.UpstreamStage != "connect_no_egress_traffic" {
 			t.Fatalf("CONNECT half-traffic upstream_stage: got %q, want %q", logEv.UpstreamStage, "connect_no_egress_traffic")
+		}
+		if logEv.UpstreamErrKind != "no_egress_traffic" {
+			t.Fatalf("CONNECT half-traffic failure kind: got %q, want %q", logEv.UpstreamErrKind, "no_egress_traffic")
 		}
 		if logEv.UpstreamStage == "connect_zero_traffic" {
 			t.Fatal("CONNECT half-traffic must not be marked as connect_zero_traffic")

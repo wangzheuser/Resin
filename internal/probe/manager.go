@@ -118,7 +118,8 @@ type probeTaskKey struct {
 }
 
 type probeTask struct {
-	key probeTaskKey
+	key     probeTaskKey
+	request *egressProbeRequest
 }
 
 type probeTaskState struct {
@@ -448,6 +449,10 @@ type EgressProbeResult struct {
 // ProbeEgressSync performs a blocking egress probe and returns the results.
 // Used by API action endpoints that must return probe data synchronously.
 func (m *ProbeManager) ProbeEgressSync(hash node.Hash) (*EgressProbeResult, error) {
+	return m.probeEgressSync(m.probeContext(), hash)
+}
+
+func (m *ProbeManager) probeEgressSync(ctx context.Context, hash node.Hash) (*EgressProbeResult, error) {
 	if m.fetcher == nil && m.contextFetcher == nil {
 		return nil, fmt.Errorf("no probe fetcher configured")
 	}
@@ -464,8 +469,8 @@ func (m *ProbeManager) ProbeEgressSync(hash node.Hash) (*EgressProbeResult, erro
 	if entry.Outbound.Load() == nil {
 		return nil, fmt.Errorf("node outbound not ready")
 	}
-	if !m.waitForProbeStart() {
-		return nil, fmt.Errorf("probe manager stopped")
+	if !m.waitForProbeStartContext(ctx) {
+		return nil, context.Canceled
 	}
 
 	// Record synchronous probe attempts for metrics parity with async paths.
@@ -473,7 +478,7 @@ func (m *ProbeManager) ProbeEgressSync(hash node.Hash) (*EgressProbeResult, erro
 		m.onProbeEvent("egress")
 	}
 
-	ip, stage, err := m.performEgressProbe(hash)
+	ip, stage, err := m.performEgressProbeContext(ctx, hash)
 	if err != nil {
 		if stage == egressProbeParseError {
 			return nil, fmt.Errorf("parse egress IP: %w", err)
@@ -716,11 +721,11 @@ func (m *ProbeManager) scanLatency() {
 	}
 }
 
-// periodicBatchLimit keeps the scanner producer below the worker consumer.
-// A failed probe can occupy a worker for the full probe timeout, so a fixed
-// batch of 128 would fill the queue when concurrency is intentionally low.
+// periodicBatchLimit keeps each scan bounded while allowing every worker to
+// receive work. Task de-duplication and the per-priority queue cap remain the
+// final safeguards when a scan finds a large due set.
 func (m *ProbeManager) periodicBatchLimit() int {
-	limit := m.workerCount / 2
+	limit := m.workerCount
 	if limit < 1 {
 		return 1
 	}
@@ -732,6 +737,11 @@ func (m *ProbeManager) runProbeWorker() {
 		task, ok := m.taskQueue.Dequeue()
 		if !ok {
 			return
+		}
+		if task.request != nil {
+			result, err := m.probeEgressSync(task.request.ctx, task.key.hash)
+			task.request.done <- egressProbeReply{result, err}
+			continue
 		}
 
 		state, ok := m.markTaskRunning(task.key)
@@ -768,6 +778,13 @@ func (m *ProbeManager) executeTask(task probeTask) {
 // probes alike. A shared limiter bounds connection establishment across all
 // workers and immediate API-triggered probes.
 func (m *ProbeManager) waitForProbeStart() bool {
+	return m.waitForProbeStartContext(m.probeContext())
+}
+
+func (m *ProbeManager) waitForProbeStartContext(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	m.probeStartMu.Lock()
 	startAt := time.Now()
 	if m.nextProbeStart.After(startAt) {
@@ -783,6 +800,8 @@ func (m *ProbeManager) waitForProbeStart() bool {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
+	case <-ctx.Done():
+		return false
 	case <-m.stopCh:
 		return false
 	case <-timer.C:
@@ -1042,24 +1061,37 @@ func (m *ProbeManager) probeLatency(hash node.Hash, entry *node.NodeEntry, testU
 }
 
 func (m *ProbeManager) performEgressProbe(hash node.Hash) (netip.Addr, egressProbeErrorStage, error) {
-	body, latency, err := m.fetch(m.probeContext(), hash, egressTraceURL)
+	return m.performEgressProbeContext(m.probeContext(), hash)
+}
+
+func (m *ProbeManager) performEgressProbeContext(ctx context.Context, hash node.Hash) (netip.Addr, egressProbeErrorStage, error) {
+	if err := ctx.Err(); err != nil {
+		return netip.Addr{}, egressProbeFetchError, err
+	}
+	body, latency, err := m.fetch(ctx, hash, egressTraceURL)
+	// User cancellation/shutdown is not evidence of a broken node.
+	if ctx.Err() != nil {
+		return netip.Addr{}, egressProbeFetchError, ctx.Err()
+	}
 	if err != nil {
 		m.pool.RecordResult(hash, false)
 		m.pool.UpdateNodeEgressIP(hash, nil, nil)
 		return netip.Addr{}, egressProbeFetchError, err
 	}
 
-	m.pool.RecordResult(hash, true)
-	if latency > 0 {
-		m.pool.RecordLatency(hash, egressTraceDomain, &latency)
-	}
-
 	ip, loc, err := ParseCloudflareTrace(body)
 	if err != nil {
+		// An error page is not a successful egress check. Preserve the last
+		// valid IP and do not change node health. The trace endpoint can reject
+		// otherwise usable exits, so an invalid trace is a target-level failure.
 		m.pool.UpdateNodeEgressIP(hash, nil, nil)
 		return netip.Addr{}, egressProbeParseError, err
 	}
 	m.pool.UpdateNodeEgressIP(hash, &ip, loc)
+	m.pool.RecordResult(hash, true)
+	if latency > 0 {
+		m.pool.RecordLatency(hash, egressTraceDomain, &latency)
+	}
 	return ip, egressProbeNoError, nil
 }
 

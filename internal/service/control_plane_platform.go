@@ -544,7 +544,8 @@ func (s *ControlPlaneService) DeletePlatform(id string) error {
 	)
 	if s.SubMgr != nil {
 		s.SubMgr.Range(func(_ string, sub *subscription.Subscription) bool {
-			if sub.RelayPlatformID() != id {
+			_, downloadPlatform := sub.DownloadConfig()
+			if sub.RelayPlatformID() != id && downloadPlatform != id {
 				return true
 			}
 			referenced = true

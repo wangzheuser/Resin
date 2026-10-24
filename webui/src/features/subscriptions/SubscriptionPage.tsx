@@ -1,7 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { AlertTriangle, ArrowRight, Eye, Filter, Info, Pencil, Plus, Power, RefreshCw, Route, Search, Sparkles, Trash2, Upload, X } from "lucide-react";
+import { Activity, AlertTriangle, ArrowRight, Eye, Filter, Info, Pencil, Plus, Power, RefreshCw, Route, Search, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { Link } from "react-router-dom";
@@ -29,10 +29,14 @@ import {
   getSubscription,
   listSubscriptions,
   refreshSubscription,
+  startSubscriptionProbe,
+  subscriptionProbeKey,
   updateSubscription,
 } from "./api";
 import { mergeUniqueSubscriptionLines } from "./import-text";
 import type { Subscription } from "./types";
+import { SubscriptionDownloadFields, SubscriptionUpdateStatus } from "./SubscriptionDownload";
+import { SubscriptionProbePanel } from "./SubscriptionProbePanel";
 
 type EnabledFilter = "all" | "enabled" | "disabled";
 type SubscriptionSourceType = "remote" | "local";
@@ -48,12 +52,15 @@ const subscriptionCreateSchema = z.object({
   url: z.string(),
   content: z.string(),
   relay_platform_id: z.string(),
+  download_mode: z.enum(["auto", "direct", "platform", "external_proxy"]),
+  download_platform_id: z.string(),
   update_interval: z.string().trim().min(1, "更新间隔不能为空"),
   ephemeral_node_evict_delay: z.string().trim().min(1, "临时节点驱逐延迟不能为空"),
   enabled: z.boolean(),
   ephemeral: z.boolean(),
   incremental_alive_nodes: z.boolean(),
 }).superRefine((value, ctx) => {
+  if (value.source_type === "remote" && value.download_mode === "platform" && !value.download_platform_id) { ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["download_platform_id"], message: "请选择下载平台" }); }
   const url = value.url.trim();
   const content = value.content.trim();
   if (value.source_type === "remote") {
@@ -99,6 +106,8 @@ function subscriptionToEditForm(subscription: Subscription): SubscriptionEditFor
     url: subscription.url,
     content: subscription.content ?? "",
     relay_platform_id: subscription.relay_platform_id ?? "",
+    download_mode: subscription.download_mode ?? "auto",
+    download_platform_id: subscription.download_platform_id ?? "",
     update_interval: subscription.update_interval,
     ephemeral_node_evict_delay: subscription.ephemeral_node_evict_delay,
     enabled: subscription.enabled,
@@ -256,7 +265,7 @@ export function SubscriptionPage() {
         offset: page * pageSize,
         keyword: search,
       }),
-    refetchInterval: 30_000,
+    refetchInterval: 5_000,
     placeholderData: (prev) => prev,
   });
 
@@ -301,6 +310,8 @@ export function SubscriptionPage() {
       url: "",
       content: "",
       relay_platform_id: "",
+      download_mode: "auto",
+      download_platform_id: "",
       update_interval: "12h",
       ephemeral_node_evict_delay: "72h",
       enabled: true,
@@ -321,6 +332,8 @@ export function SubscriptionPage() {
       url: "",
       content: "",
       relay_platform_id: "",
+      download_mode: "auto",
+      download_platform_id: "",
       update_interval: "12h",
       ephemeral_node_evict_delay: "72h",
       enabled: true,
@@ -424,6 +437,8 @@ export function SubscriptionPage() {
         url: "",
         content: "",
         relay_platform_id: "",
+      download_mode: "auto",
+      download_platform_id: "",
         update_interval: LOCAL_SOURCE_UPDATE_INTERVAL,
         ephemeral_node_evict_delay: "72h",
         enabled: true,
@@ -453,6 +468,8 @@ export function SubscriptionPage() {
         ephemeral: formData.ephemeral,
         incremental_alive_nodes: formData.incremental_alive_nodes,
         relay_platform_id: formData.relay_platform_id,
+        download_mode: formData.source_type === "local" ? "auto" as const : formData.download_mode,
+        download_platform_id: formData.source_type === "local" ? "" : formData.download_platform_id,
         ...(formData.source_type === "remote"
           ? { url: formData.url.trim() }
           : editForm.getFieldState("content").isDirty
@@ -525,11 +542,20 @@ export function SubscriptionPage() {
       await invalidateSubscriptions();
       showToast("success", t("订阅 {{name}} 已手动刷新", { name: subscription.name }));
     },
+    onSettled: async () => { await Promise.all([invalidateSubscriptions(), queryClient.invalidateQueries({ queryKey: ["subscription"] })]); },
     onError: (error) => {
       showToast("error", formatApiErrorMessage(error, t));
     },
   });
   const refreshSubscriptionMutateAsync = refreshMutation.mutateAsync;
+
+  const probeMutation = useMutation({
+    mutationFn: startSubscriptionProbe,
+    onSuccess: (job) => queryClient.setQueryData(subscriptionProbeKey, job),
+    onError: (error) => showToast("error", formatApiErrorMessage(error, t)),
+  });
+  const startProbe = probeMutation.mutate;
+  const probeStarting = probeMutation.isPending;
 
   const markRefreshPending = useCallback((subscriptionId: string): boolean => {
     if (pendingRefreshIdsRef.current.has(subscriptionId)) {
@@ -582,6 +608,8 @@ export function SubscriptionPage() {
       ephemeral: values.ephemeral,
       incremental_alive_nodes: values.incremental_alive_nodes,
       relay_platform_id: values.relay_platform_id,
+      download_mode: values.source_type === "local" ? "auto" as const : values.download_mode,
+      download_platform_id: values.source_type === "local" ? "" : values.download_platform_id,
       ...(values.source_type === "remote"
         ? { url: values.url.trim() }
         : { content: values.content }),
@@ -699,29 +727,24 @@ export function SubscriptionPage() {
       }),
       col.display({
         id: "node_count",
-        header: t("健康 / 总数"),
+        header: t("节点健康状态"),
         cell: (info) => {
           const s = info.row.original;
-          return `${s.healthy_node_count} / ${s.node_count}`;
+          return <div className="subscription-health-cell">
+            <strong>{t("健康 {{healthy}} / 总数 {{total}}", { healthy: s.healthy_node_count, total: s.node_count })}</strong>
+            <span>{t("待测 {{pending}} · 失败 {{failed}} · 构建失败 {{build}}", {
+              pending: s.pending_node_count, failed: s.failed_node_count, build: s.build_failed_node_count,
+            })}</span>
+            {s.disabled_node_count > 0 ? <span>{t("已禁用 {{count}}", { count: s.disabled_node_count })}</span> : null}
+            <span title={formatDateTime(s.last_probe_at || "")}>{t("最近探测：{{time}}", { time: s.last_probe_at ? formatRelativeTime(s.last_probe_at) : t("尚未探测") })}</span>
+            {s.stale_node_count > 0 ? <span>{t("超过 24 小时未测：{{count}}", { count: s.stale_node_count })}</span> : null}
+          </div>;
         },
       }),
       col.display({
         id: "status",
-        header: t("状态"),
-        cell: (info) => {
-          const s = info.row.original;
-          return (
-            <div className="subscriptions-status-cell">
-              {!s.enabled ? (
-                <Badge variant="warning">{t("已禁用")}</Badge>
-              ) : s.last_error ? (
-                <Badge variant="danger">{t("错误")}</Badge>
-              ) : (
-                <Badge variant="success">{t("正常")}</Badge>
-              )}
-            </div>
-          );
-        },
+        header: t("订阅更新状态"),
+        cell: (info) => <SubscriptionUpdateStatus subscription={info.row.original} />,
       }),
       col.accessor("last_checked", {
         header: t("上次检查"),
@@ -748,6 +771,11 @@ export function SubscriptionPage() {
               </Link>
               <Button size="sm" variant="ghost" onClick={() => openDrawer(s)} title={t("编辑")}>
                 <Pencil size={14} />
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => startProbe(s.id)}
+                disabled={!s.enabled || probeStarting} title={t("限速复测节点")}
+                aria-label={t("复测订阅 {{name}} 的节点", { name: s.name })}>
+                <Activity size={14} />
               </Button>
               <Button
                 size="sm"
@@ -783,7 +811,7 @@ export function SubscriptionPage() {
         },
       }),
     ],
-    [col, handleDelete, handleRefresh, handleToggleEnabled, isDeletePending, isRefreshPending, isToggleEnabledPending, openDrawer, relayPlatformByID, t]
+    [col, handleDelete, handleRefresh, handleToggleEnabled, isDeletePending, isRefreshPending, isToggleEnabledPending, openDrawer, relayPlatformByID, startProbe, probeStarting, t]
   );
 
   return (
@@ -796,6 +824,9 @@ export function SubscriptionPage() {
       </header>
 
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
+
+      <p className="subscription-health-hint">{t("健康数是缓存状态，待测不代表不可用；失败包含探测或实际请求触发的熔断。订阅拉取正常不代表节点可用。")}</p>
+      <SubscriptionProbePanel />
 
       <Card className="platform-list-card platform-directory-card">
         <div className="list-card-header">
@@ -945,6 +976,7 @@ export function SubscriptionPage() {
                   </div>
                 </div>
 
+                <SubscriptionUpdateStatus subscription={selectedSubscription} detail />
                 {selectedSubscription.last_error ? (
                   <div className="callout callout-error">{t("最近错误：{{message}}", { message: selectedSubscription.last_error })}</div>
                 ) : (
@@ -1077,6 +1109,11 @@ export function SubscriptionPage() {
                     </div>
                   )}
 
+              {editSourceType === "remote" ? <>
+                <SubscriptionDownloadFields id="edit-sub-download-mode" mode={editForm.watch("download_mode")} platformID={editForm.watch("download_platform_id")} platforms={relayPlatforms}
+                  onChange={(mode, platformID) => { editForm.setValue("download_mode", mode, { shouldDirty: true }); editForm.setValue("download_platform_id", platformID, { shouldDirty: true, shouldValidate: true }); }} />
+                {editForm.formState.errors.download_platform_id?.message ? <p className="field-error">{t("请选择下载平台")}</p> : null}
+              </> : null}
                   <RelayPlatformPicker
                     id="edit-sub-relay-platform"
                     value={editRelayPlatformID}
@@ -1365,6 +1402,11 @@ export function SubscriptionPage() {
                 </div>
               )}
 
+              {createSourceType === "remote" ? <>
+                <SubscriptionDownloadFields id="create-sub-download-mode" mode={createForm.watch("download_mode")} platformID={createForm.watch("download_platform_id")} platforms={relayPlatforms}
+                  onChange={(mode, platformID) => { createForm.setValue("download_mode", mode, { shouldDirty: true }); createForm.setValue("download_platform_id", platformID, { shouldDirty: true, shouldValidate: true }); }} />
+                {createForm.formState.errors.download_platform_id?.message ? <p className="field-error">{t("请选择下载平台")}</p> : null}
+              </> : null}
               <RelayPlatformPicker
                 id="create-sub-relay-platform"
                 value={createRelayPlatformID}

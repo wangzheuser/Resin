@@ -109,3 +109,18 @@ func TestDirectDownloader_DynamicUserAgentPulled(t *testing.T) {
 		t.Fatalf("expected second UA agent-b, got %q", string(body))
 	}
 }
+
+func TestDirectDownloader_ResponseBodyLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("0123456789"))
+	}))
+	defer srv.Close()
+
+	d := NewDirectDownloader(func() time.Duration { return time.Second }, func() string { return "" })
+	d.MaxResponseBytes = 4
+	_, err := d.Download(context.Background(), srv.URL)
+	var tooLarge *ResponseTooLargeError
+	if !errors.As(err, &tooLarge) || tooLarge.Limit != 4 {
+		t.Fatalf("expected bounded response error, got %v", err)
+	}
+}

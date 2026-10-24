@@ -18,6 +18,12 @@ import (
 
 const maxUpstreamErrMsgLen = 512
 
+var (
+	errTunnelZeroTraffic = errors.New("connect_zero_traffic")
+	errTunnelNoIngress   = errors.New("connect_no_ingress_traffic")
+	errTunnelNoEgress    = errors.New("connect_no_egress_traffic")
+)
+
 type upstreamErrorDetail struct {
 	Kind    string
 	Errno   string
@@ -43,7 +49,12 @@ func summarizeUpstreamError(err error) upstreamErrorDetail {
 
 // shouldRecordTargetEgressFailure excludes client cancellation and HTTP status responses from target circuits.
 func shouldRecordTargetEgressFailure(detail upstreamErrorDetail) bool {
-	return detail.Kind != "" && detail.Kind != "canceled" && detail.Kind != "http_status_error"
+	switch detail.Kind {
+	case "", "canceled", "http_status_error", "zero_traffic", "no_ingress_traffic", "no_egress_traffic":
+		return false
+	default:
+		return true
+	}
 }
 
 func extractHTTPStatusCode(err error) (int, bool) {
@@ -62,7 +73,14 @@ func classifyUpstreamErrKind(err error, errno string) string {
 	if err == nil {
 		return ""
 	}
-	if errors.Is(err, context.Canceled) {
+	switch {
+	case errors.Is(err, errTunnelZeroTraffic):
+		return "zero_traffic"
+	case errors.Is(err, errTunnelNoIngress):
+		return "no_ingress_traffic"
+	case errors.Is(err, errTunnelNoEgress):
+		return "no_egress_traffic"
+	case errors.Is(err, context.Canceled):
 		return "canceled"
 	}
 	if os.IsTimeout(err) || errors.Is(err, context.DeadlineExceeded) {

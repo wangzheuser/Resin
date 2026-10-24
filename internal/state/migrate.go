@@ -26,6 +26,7 @@ const (
 	stateVersionAddIncrementalAliveNodes         = 5
 	stateVersionAddPassiveCircuitBreakerDisabled = 6
 	stateVersionAddSubscriptionRelayPlatform     = 7
+	stateVersionAddSubscriptionDownload          = 8
 	stateLegacyBaselineVersion                   = stateVersionAddFixedAccountHeader
 
 	stateBaseSchemaMigration = stateMigrationsPath + "/000001_state_base.up.sql"

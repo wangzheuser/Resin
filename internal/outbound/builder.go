@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	stdlog "log"
 	"strings"
 	"sync"
 
@@ -154,6 +155,7 @@ func NewSingboxBuilderWithConfig(cfg SingboxBuilderConfig) (*SingboxBuilder, err
 // type/tag fields) into a real adapter.Outbound and runs it through the
 // lifecycle stages.
 func (b *SingboxBuilder) Build(rawOptions json.RawMessage, relayPlatformIDs ...string) (adapter.Outbound, error) {
+	originalNodeOptions := rawOptions
 	relayPlatformID := firstRelayPlatformID(relayPlatformIDs)
 	if relayPlatformID != "" {
 		detourTag, err := b.ensureRelayPlatformOutbound(relayPlatformID)
@@ -172,6 +174,10 @@ func (b *SingboxBuilder) Build(rawOptions json.RawMessage, relayPlatformIDs ...s
 	if err := sJson.UnmarshalContext(b.ctx, rawOptions, &outboundConfig); err != nil {
 		return nil, fmt.Errorf("parse outbound options: %w", err)
 	}
+	logger := b.logFactory.NewLogger("outbound/" + outboundConfig.Type)
+	if normalizeTLSFingerprint(outboundConfig.Options) {
+		stdlog.Printf("[outbound] unsupported uTLS fingerprint; using standard TLS node=%s", node.HashFromRawOptions(originalNodeOptions).Hex())
+	}
 	var dependencies []string
 	if options, ok := outboundConfig.Options.(option.DialerOptionsWrapper); ok {
 		if detour := options.TakeDialerOptions().Detour; detour != "" {
@@ -184,7 +190,6 @@ func (b *SingboxBuilder) Build(rawOptions json.RawMessage, relayPlatformIDs ...s
 	}
 
 	// 2. Create the outbound instance via the registry.
-	logger := b.logFactory.NewLogger("outbound/" + outboundConfig.Type)
 	ob, err := b.registry.CreateOutbound(
 		buildCtx,
 		nil, // router — not needed for simple dialing

@@ -40,6 +40,12 @@ func TestShouldRecordTargetEgressFailure(t *testing.T) {
 	if !shouldRecordTargetEgressFailure(summarizeUpstreamError(io.ErrUnexpectedEOF)) {
 		t.Fatal("unexpected EOF should open a target-egress circuit")
 	}
+	for _, err := range []error{errTunnelZeroTraffic, errTunnelNoIngress, errTunnelNoEgress} {
+		detail := summarizeUpstreamError(err)
+		if detail.Kind == "" || shouldRecordTargetEgressFailure(detail) {
+			t.Fatalf("tunnel no-traffic error must be classified without opening a circuit: %+v", detail)
+		}
+	}
 }
 
 func TestSummarizeUpstreamError_Canceled(t *testing.T) {

@@ -59,6 +59,11 @@ type tunnelPumpOptions struct {
 	maxLifetime                 time.Duration
 }
 
+// The CONNECT setup deadline remains 15 seconds overall (ApplyDialDeadline),
+// but a failed first route gets a bounded share so the second route can still
+// be tried before the request expires.
+const connectAttemptBudget = 7500 * time.Millisecond
+
 const (
 	defaultTunnelIdleTimeout = time.Minute
 	defaultTunnelMaxLifetime = 30 * time.Minute
@@ -175,17 +180,25 @@ func prepareConnectTunnel(
 		if deps.health != nil {
 			go deps.health.RecordLatency(routed.Route.NodeHash, domain, nil)
 		}
-		rawConn, err := routed.Outbound.DialContext(ctx, "tcp", M.ParseSocksaddr(target))
+		attemptCtx := ctx
+		var attemptCancel context.CancelFunc
+		if attempt == 0 {
+			attemptCtx, attemptCancel = context.WithTimeout(ctx, connectAttemptBudget)
+		}
+		rawConn, err := routed.Outbound.DialContext(attemptCtx, "tcp", M.ParseSocksaddr(target))
 		if err == nil {
 			if earlyConn, ok := common.Cast[N.EarlyConn](rawConn); ok && earlyConn.NeedHandshake() {
 				// Protocol handshakes may block in Write after DialContext has
 				// returned. Keep the setup deadline active through this phase.
-				stop := context.AfterFunc(ctx, func() { _ = rawConn.Close() })
+				stop := context.AfterFunc(attemptCtx, func() { _ = rawConn.Close() })
 				_, err = rawConn.Write(nil)
 				if !stop() {
-					err = ctx.Err()
+					err = attemptCtx.Err()
 				}
 			}
+		}
+		if attemptCancel != nil {
+			attemptCancel()
 		}
 		if err != nil {
 			if rawConn != nil {
@@ -208,8 +221,8 @@ func prepareConnectTunnel(
 					routed.Route.EgressIP,
 				)
 			}
-			// A spent setup budget cannot try another node. Retrying here
-			// would mark that untouched node unhealthy using the old timeout.
+			// The per-attempt budget can be spent while the overall setup
+			// deadline remains available for one different route.
 			if attempt == 0 && ctx.Err() == nil {
 				initialProxyErr = proxyErr
 				initialUpstreamErr = err
@@ -479,10 +492,13 @@ func pumpPreparedTunnelReader(
 		switch {
 		case ingressResult.n == 0 && egressResult.n == 0:
 			result.upstreamStage = "connect_zero_traffic"
+			result.upstreamErr = errTunnelZeroTraffic
 		case ingressResult.n == 0:
 			result.upstreamStage = "connect_no_ingress_traffic"
+			result.upstreamErr = errTunnelNoIngress
 		default:
 			result.upstreamStage = "connect_no_egress_traffic"
+			result.upstreamErr = errTunnelNoEgress
 		}
 	}
 	return result

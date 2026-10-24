@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Resinat/Resin/internal/model"
+	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/state"
 	"github.com/Resinat/Resin/internal/subscription"
@@ -22,28 +24,44 @@ import (
 
 // SubscriptionResponse is the API response for a subscription.
 type SubscriptionResponse struct {
-	ID                      string `json:"id"`
-	Name                    string `json:"name"`
-	SourceType              string `json:"source_type"`
-	URL                     string `json:"url"`
-	Content                 string `json:"content"`
-	RelayPlatformID         string `json:"relay_platform_id"`
-	UpdateInterval          string `json:"update_interval"`
-	NodeCount               int    `json:"node_count"`
-	HealthyNodeCount        int    `json:"healthy_node_count"`
-	Ephemeral               bool   `json:"ephemeral"`
-	IncrementalAliveNodes   bool   `json:"incremental_alive_nodes"`
-	EphemeralNodeEvictDelay string `json:"ephemeral_node_evict_delay"`
-	Enabled                 bool   `json:"enabled"`
-	CreatedAt               string `json:"created_at"`
-	LastChecked             string `json:"last_checked,omitempty"`
-	LastUpdated             string `json:"last_updated,omitempty"`
-	LastError               string `json:"last_error,omitempty"`
+	DownloadMode            string                    `json:"download_mode"`
+	DownloadPlatformID      string                    `json:"download_platform_id"`
+	UpdateStatus            string                    `json:"update_status"`
+	ConsecutiveFailures     int                       `json:"consecutive_failures"`
+	NextRefresh             string                    `json:"next_refresh,omitempty"`
+	LastErrorKind           string                    `json:"last_error_kind,omitempty"`
+	DownloadAttempts        []netutil.DownloadAttempt `json:"download_attempts"`
+	ID                      string                    `json:"id"`
+	Name                    string                    `json:"name"`
+	SourceType              string                    `json:"source_type"`
+	URL                     string                    `json:"url"`
+	Content                 string                    `json:"content"`
+	RelayPlatformID         string                    `json:"relay_platform_id"`
+	UpdateInterval          string                    `json:"update_interval"`
+	NodeCount               int                       `json:"node_count"`
+	HealthyNodeCount        int                       `json:"healthy_node_count"`
+	PendingNodeCount        int                       `json:"pending_node_count"`
+	FailedNodeCount         int                       `json:"failed_node_count"`
+	BuildFailedNodeCount    int                       `json:"build_failed_node_count"`
+	DisabledNodeCount       int                       `json:"disabled_node_count"`
+	StaleNodeCount          int                       `json:"stale_node_count"`
+	LastProbeAt             string                    `json:"last_probe_at,omitempty"`
+	Ephemeral               bool                      `json:"ephemeral"`
+	IncrementalAliveNodes   bool                      `json:"incremental_alive_nodes"`
+	EphemeralNodeEvictDelay string                    `json:"ephemeral_node_evict_delay"`
+	Enabled                 bool                      `json:"enabled"`
+	CreatedAt               string                    `json:"created_at"`
+	LastChecked             string                    `json:"last_checked,omitempty"`
+	LastUpdated             string                    `json:"last_updated,omitempty"`
+	LastError               string                    `json:"last_error,omitempty"`
 }
 
 func (s *ControlPlaneService) subToResponse(sub *subscription.Subscription) SubscriptionResponse {
 	nodeCount := 0
 	healthyNodeCount := 0
+	pending, failed, buildFailed, disabled, stale := 0, 0, 0, 0, 0
+	var lastProbe int64
+	staleBefore := time.Now().Add(-24 * time.Hour).UnixNano()
 	var isHealthyAndEnabled func(*node.NodeEntry) bool
 	if sub.Enabled() && s != nil && s.Pool != nil {
 		isHealthyAndEnabled = s.Pool.MakeHealthyAndEnabledEvaluator()
@@ -54,11 +72,33 @@ func (s *ControlPlaneService) subToResponse(sub *subscription.Subscription) Subs
 				return true
 			}
 			nodeCount++
-			if isHealthyAndEnabled != nil {
-				entry, ok := s.Pool.GetEntry(h)
-				if ok && isHealthyAndEnabled(entry) {
-					healthyNodeCount++
+			var entry *node.NodeEntry
+			if s != nil && s.Pool != nil {
+				entry, _ = s.Pool.GetEntry(h)
+			}
+			if entry != nil {
+				attempt := entry.LastEgressUpdateAttempt.Load()
+				lastProbe = max(lastProbe, attempt)
+				if attempt > 0 && attempt < staleBefore {
+					stale++
 				}
+			}
+			// Keep these categories disjoint; unbuilt without an error is still pending.
+			switch {
+			case !sub.Enabled():
+				disabled++
+			case entry == nil:
+				pending++
+			case !entry.HasOutbound() && entry.GetLastError() != "":
+				buildFailed++
+			case !entry.HasOutbound():
+				pending++
+			case isHealthyAndEnabled != nil && isHealthyAndEnabled(entry):
+				healthyNodeCount++
+			case entry.LastEgressUpdateAttempt.Load() == 0 && entry.FailureCount.Load() == 0:
+				pending++
+			default:
+				failed++
 			}
 			return true
 		})
@@ -74,17 +114,37 @@ func (s *ControlPlaneService) subToResponse(sub *subscription.Subscription) Subs
 		UpdateInterval:          time.Duration(sub.UpdateIntervalNs()).String(),
 		NodeCount:               nodeCount,
 		HealthyNodeCount:        healthyNodeCount,
+		PendingNodeCount:        pending,
+		FailedNodeCount:         failed,
+		BuildFailedNodeCount:    buildFailed,
+		DisabledNodeCount:       disabled,
+		StaleNodeCount:          stale,
 		Ephemeral:               sub.Ephemeral(),
 		IncrementalAliveNodes:   sub.IncrementalAliveNodes(),
 		EphemeralNodeEvictDelay: time.Duration(sub.EphemeralNodeEvictDelayNs()).String(),
 		Enabled:                 sub.Enabled(),
 		CreatedAt:               time.Unix(0, sub.CreatedAtNs).UTC().Format(time.RFC3339Nano),
 	}
+	if lastProbe > 0 {
+		resp.LastProbeAt = time.Unix(0, lastProbe).UTC().Format(time.RFC3339Nano)
+	}
 	if lc := sub.LastCheckedNs.Load(); lc > 0 {
 		resp.LastChecked = time.Unix(0, lc).UTC().Format(time.RFC3339Nano)
 	}
 	if lu := sub.LastUpdatedNs.Load(); lu > 0 {
 		resp.LastUpdated = time.Unix(0, lu).UTC().Format(time.RFC3339Nano)
+	}
+	resp.DownloadMode, resp.DownloadPlatformID = sub.DownloadConfig()
+	history := sub.RefreshSnapshot()
+	resp.UpdateStatus = sub.RefreshStatus()
+	resp.ConsecutiveFailures = history.ConsecutiveFailures
+	resp.LastErrorKind = history.ErrorKind
+	resp.DownloadAttempts = history.Attempts
+	if resp.DownloadAttempts == nil {
+		resp.DownloadAttempts = []netutil.DownloadAttempt{}
+	}
+	if history.NextRefreshNs > 0 {
+		resp.NextRefresh = time.Unix(0, history.NextRefreshNs).UTC().Format(time.RFC3339Nano)
 	}
 	resp.LastError = sub.GetLastError()
 	return resp
@@ -118,6 +178,8 @@ func (s *ControlPlaneService) GetSubscription(id string) (*SubscriptionResponse,
 
 // CreateSubscriptionRequest holds create subscription parameters.
 type CreateSubscriptionRequest struct {
+	DownloadMode            *string `json:"download_mode"`
+	DownloadPlatformID      *string `json:"download_platform_id"`
 	Name                    *string `json:"name"`
 	SourceType              *string `json:"source_type"`
 	URL                     *string `json:"url"`
@@ -262,11 +324,27 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 		}
 	}
 
+	mode, downloadPlatform := "auto", ""
+	if req.DownloadMode != nil {
+		mode = *req.DownloadMode
+	}
+	if req.DownloadPlatformID != nil {
+		downloadPlatform = *req.DownloadPlatformID
+	}
+	if mode == "platform" && (req.RelayPlatformID == nil || strings.TrimSpace(*req.RelayPlatformID) == "") {
+		s.relayReferenceMu.RLock()
+		defer s.relayReferenceMu.RUnlock()
+	}
+	mode, downloadPlatform, downloadErr := s.normalizeSubscriptionDownload(sourceType, mode, downloadPlatform)
+	if downloadErr != nil {
+		return nil, downloadErr
+	}
 	id := uuid.New().String()
 	now := time.Now().UnixNano()
 
 	ms := model.Subscription{
-		ID:                        id,
+		ID:           id,
+		DownloadMode: mode, DownloadPlatformID: downloadPlatform,
 		Name:                      name,
 		SourceType:                sourceType,
 		URL:                       subURL,
@@ -286,6 +364,7 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 
 	sub := subscription.NewSubscription(id, name, subURL, enabled, ephemeral)
 	sub.SetFetchConfig(subURL, int64(updateInterval))
+	sub.SetDownloadConfig(mode, downloadPlatform)
 	sub.SetSourceType(sourceType)
 	sub.SetContent(content)
 	sub.SetRelayPlatformID(relayPlatformID)
@@ -384,6 +463,27 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 		relayPlatformChanged = newRelayPlatformID != sub.RelayPlatformID()
 	}
 
+	mode, downloadPlatform := sub.DownloadConfig()
+	oldMode, oldDownloadPlatform := mode, downloadPlatform
+	if value, ok, err := patch.optionalString("download_mode"); err != nil {
+		return nil, err
+	} else if ok {
+		mode = value
+	}
+	if value, ok, err := patch.optionalString("download_platform_id"); err != nil {
+		return nil, err
+	} else if ok {
+		downloadPlatform = value
+	}
+	if _, relayPatched := patch["relay_platform_id"]; mode == "platform" && !relayPatched {
+		s.relayReferenceMu.RLock()
+		defer s.relayReferenceMu.RUnlock()
+	}
+	mode, downloadPlatform, downloadErr := s.normalizeSubscriptionDownload(sourceType, mode, downloadPlatform)
+	if downloadErr != nil {
+		return nil, downloadErr
+	}
+	downloadChanged := oldMode != mode || oldDownloadPlatform != downloadPlatform
 	newInterval := sub.UpdateIntervalNs()
 	if d, ok, err := patch.optionalDurationString("update_interval"); err != nil {
 		return nil, err
@@ -394,6 +494,7 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 		newInterval = int64(d)
 	}
 
+	intervalChanged := newInterval != sub.UpdateIntervalNs()
 	newEnabled := sub.Enabled()
 	if b, ok, err := patch.optionalBool("enabled"); err != nil {
 		return nil, err
@@ -430,6 +531,7 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 
 	now := time.Now().UnixNano()
 	ms := model.Subscription{
+		DownloadMode: mode, DownloadPlatformID: downloadPlatform,
 		ID:                        id,
 		Name:                      newName,
 		SourceType:                sourceType,
@@ -450,6 +552,7 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 
 	// Apply side-effects via scheduler.
 	sub.SetFetchConfig(newURL, newInterval)
+	sub.SetDownloadConfig(mode, downloadPlatform)
 	sub.SetContent(newContent)
 	if relayPlatformChanged {
 		s.Scheduler.SetSubscriptionRelayPlatformID(sub, newRelayPlatformID)
@@ -467,7 +570,8 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 	if enabledChanged {
 		s.Scheduler.SetSubscriptionEnabled(sub, newEnabled)
 	}
-	if urlChanged || contentChanged || relayPlatformChanged {
+	if urlChanged || contentChanged || relayPlatformChanged || downloadChanged || intervalChanged || (enabledChanged && newEnabled) {
+		s.Scheduler.CancelRefresh(sub)
 		go s.Scheduler.UpdateSubscription(sub)
 	}
 
@@ -517,6 +621,8 @@ func (s *ControlPlaneService) DeleteSubscription(id string) error {
 			s.Pool.RemoveNodeFromSub(h, id)
 		}
 		s.SubMgr.Unregister(id)
+		s.Scheduler.CancelRefresh(sub)
+		s.Engine.MarkSubscriptionRefreshDelete(id)
 	})
 
 	return deleteErr
@@ -524,12 +630,31 @@ func (s *ControlPlaneService) DeleteSubscription(id string) error {
 
 // RefreshSubscription triggers an immediate subscription refresh (blocks).
 func (s *ControlPlaneService) RefreshSubscription(id string) error {
+	return s.RefreshSubscriptionContext(context.Background(), id)
+}
+
+// RefreshSubscriptionContext propagates the caller cancellation into the
+// shared subscription refresh flight and downloader.
+func (s *ControlPlaneService) RefreshSubscriptionContext(ctx context.Context, id string) error {
 	sub := s.SubMgr.Lookup(id)
 	if sub == nil {
 		return notFound("subscription not found")
 	}
-	s.Scheduler.UpdateSubscription(sub)
-	return nil
+	err := s.Scheduler.UpdateSubscriptionContext(ctx, sub)
+	if err == nil {
+		return nil
+	}
+	failure := netutil.ClassifySubscriptionError(err)
+	code := "SUBSCRIPTION_FETCH_FAILED"
+	switch failure.Kind {
+	case "timeout":
+		code = "SUBSCRIPTION_FETCH_TIMEOUT"
+	case "no_route", "configuration", "cancelled":
+		code = "SUBSCRIPTION_NO_ROUTE"
+	case "parse":
+		code = "SUBSCRIPTION_PARSE_FAILED"
+	}
+	return &ServiceError{Code: code, Message: failure.Message, Err: err}
 }
 
 // CleanupSubscriptionCircuitOpenNodes removes problematic nodes from a subscription.
@@ -591,4 +716,31 @@ func shouldCleanupSubscriptionNode(entry *node.NodeEntry) bool {
 		return false
 	}
 	return entry.IsCircuitOpen() || (!entry.HasOutbound() && entry.GetLastError() != "")
+}
+
+func (s *ControlPlaneService) normalizeSubscriptionDownload(source, mode, id string) (string, string, *ServiceError) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	id = strings.TrimSpace(id)
+	if mode == "" {
+		mode = "auto"
+	}
+	switch mode {
+	case "auto", "direct", "platform", "external_proxy":
+	default:
+		return "", "", invalidArg("download_mode: invalid mode")
+	}
+	if source == subscription.SourceTypeLocal && (mode != "auto" || id != "") {
+		return "", "", invalidArg("local subscriptions do not use download routes")
+	}
+	if mode != "platform" {
+		if id != "" {
+			return "", "", invalidArg("download_platform_id requires platform mode")
+		}
+		return mode, "", nil
+	}
+	if id == "" {
+		return "", "", invalidArg("download_platform_id is required")
+	}
+	normalized, err := s.normalizeSubscriptionRelayPlatformID(id)
+	return mode, normalized, err
 }

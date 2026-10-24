@@ -32,6 +32,7 @@ func RepairConsistency(stateDBPath string, cacheDB *sql.DB) error {
 	defer tx.Rollback()
 
 	stmts := []string{
+		`DELETE FROM subscription_refresh WHERE subscription_id NOT IN (SELECT id FROM state_db.subscriptions)`,
 		// 1. subscription_nodes: orphan subscription or orphan node
 		`DELETE FROM subscription_nodes
 		 WHERE subscription_id NOT IN (SELECT id FROM state_db.subscriptions)

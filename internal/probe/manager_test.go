@@ -1056,6 +1056,17 @@ func TestNewProbeManager_DefaultsProbeConcurrency(t *testing.T) {
 	if mgr.workerCount != defaultProbeConcurrency {
 		t.Fatalf("worker count = %d, want %d", mgr.workerCount, defaultProbeConcurrency)
 	}
+	if got := mgr.periodicBatchLimit(); got != defaultProbeConcurrency {
+		t.Fatalf("periodic batch limit = %d, want %d", got, defaultProbeConcurrency)
+	}
+}
+
+func TestProbeManager_PeriodicBatchLimitMatchesConfiguredWorkers(t *testing.T) {
+	mgr := NewProbeManager(ProbeConfig{Concurrency: 4})
+	defer mgr.Stop()
+	if got := mgr.periodicBatchLimit(); got != 4 {
+		t.Fatalf("periodic batch limit = %d, want 4", got)
+	}
 }
 
 func TestProbeStartLimiterSpacesStarts(t *testing.T) {

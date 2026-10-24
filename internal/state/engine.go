@@ -20,11 +20,12 @@ type SubscriptionNodeDirtyKey = model.SubscriptionNodeKey
 // If a reader returns nil for a key marked OpUpsert, the key is
 // treated as a delete (the object was removed between mark and flush).
 type CacheReaders struct {
-	ReadNodeStatic       func(hash string) *model.NodeStatic
-	ReadNodeDynamic      func(hash string) *model.NodeDynamic
-	ReadNodeLatency      func(key NodeLatencyDirtyKey) *model.NodeLatency
-	ReadLease            func(key LeaseDirtyKey) *model.Lease
-	ReadSubscriptionNode func(key SubscriptionNodeDirtyKey) *model.SubscriptionNode
+	ReadSubscriptionRefresh func(string) *model.SubscriptionRefresh
+	ReadNodeStatic          func(hash string) *model.NodeStatic
+	ReadNodeDynamic         func(hash string) *model.NodeDynamic
+	ReadNodeLatency         func(key NodeLatencyDirtyKey) *model.NodeLatency
+	ReadLease               func(key LeaseDirtyKey) *model.Lease
+	ReadSubscriptionNode    func(key SubscriptionNodeDirtyKey) *model.SubscriptionNode
 }
 
 // StateEngine is the single write entry point for all persistence operations.
@@ -32,6 +33,7 @@ type CacheReaders struct {
 // transactional writes to state.db. Weak-persist data (nodes, leases) is
 // marked dirty and batch-flushed to cache.db.
 type StateEngine struct {
+	dirtySubscriptionRefresh *DirtySet[string]
 	*StateRepo
 	*CacheRepo
 
@@ -45,14 +47,20 @@ type StateEngine struct {
 // newStateEngine creates a StateEngine with the given repos.
 func newStateEngine(stateRepo *StateRepo, cacheRepo *CacheRepo) *StateEngine {
 	return &StateEngine{
-		StateRepo:              stateRepo,
-		CacheRepo:              cacheRepo,
-		dirtyNodesStatic:       NewDirtySet[string](),
-		dirtyNodesDynamic:      NewDirtySet[string](),
-		dirtyNodeLatency:       NewDirtySet[NodeLatencyDirtyKey](),
-		dirtyLeases:            NewDirtySet[LeaseDirtyKey](),
-		dirtySubscriptionNodes: NewDirtySet[SubscriptionNodeDirtyKey](),
+		dirtySubscriptionRefresh: NewDirtySet[string](),
+		StateRepo:                stateRepo,
+		CacheRepo:                cacheRepo,
+		dirtyNodesStatic:         NewDirtySet[string](),
+		dirtyNodesDynamic:        NewDirtySet[string](),
+		dirtyNodeLatency:         NewDirtySet[NodeLatencyDirtyKey](),
+		dirtyLeases:              NewDirtySet[LeaseDirtyKey](),
+		dirtySubscriptionNodes:   NewDirtySet[SubscriptionNodeDirtyKey](),
 	}
+}
+
+func (e *StateEngine) MarkSubscriptionRefresh(id string) { e.dirtySubscriptionRefresh.MarkUpsert(id) }
+func (e *StateEngine) MarkSubscriptionRefreshDelete(id string) {
+	e.dirtySubscriptionRefresh.MarkDelete(id)
 }
 
 // --- Weak-persist methods (dirty-mark only) ---
@@ -85,7 +93,7 @@ func (e *StateEngine) MarkSubscriptionNodeDelete(subID, nodeHash string) {
 
 // DirtyCount returns the total number of dirty entries across all sets.
 func (e *StateEngine) DirtyCount() int {
-	return e.dirtyNodesStatic.Len() +
+	return e.dirtySubscriptionRefresh.Len() + e.dirtyNodesStatic.Len() +
 		e.dirtyNodesDynamic.Len() +
 		e.dirtyNodeLatency.Len() +
 		e.dirtyLeases.Len() +
@@ -119,6 +127,7 @@ func classifyDirtySet[K comparable, V any](
 // On failure, undrained entries are merged back.
 func (e *StateEngine) FlushDirtySets(readers CacheReaders) error {
 	// Drain all sets atomically (each set is individually atomic).
+	drainedRefresh := e.dirtySubscriptionRefresh.Drain()
 	drainedStatic := e.dirtyNodesStatic.Drain()
 	drainedSubNodes := e.dirtySubscriptionNodes.Drain()
 	drainedDynamic := e.dirtyNodesDynamic.Drain()
@@ -127,6 +136,7 @@ func (e *StateEngine) FlushDirtySets(readers CacheReaders) error {
 
 	// Re-merge helper on failure.
 	remerge := func() {
+		e.dirtySubscriptionRefresh.Merge(drainedRefresh)
 		e.dirtyNodesStatic.Merge(drainedStatic)
 		e.dirtySubscriptionNodes.Merge(drainedSubNodes)
 		e.dirtyNodesDynamic.Merge(drainedDynamic)
@@ -135,6 +145,7 @@ func (e *StateEngine) FlushDirtySets(readers CacheReaders) error {
 	}
 
 	// Classify each dirty set into upsert values and delete keys.
+	upsertRefresh, deleteRefresh := classifyDirtySet(drainedRefresh, readers.ReadSubscriptionRefresh)
 	upsertStatic, deleteStatic := classifyDirtySet(drainedStatic, readers.ReadNodeStatic)
 	upsertSubNodes, deleteSubNodes := classifyDirtySet(drainedSubNodes, readers.ReadSubscriptionNode)
 	upsertDynamic, deleteDynamic := classifyDirtySet(drainedDynamic, readers.ReadNodeDynamic)
@@ -143,6 +154,7 @@ func (e *StateEngine) FlushDirtySets(readers CacheReaders) error {
 
 	// Execute all writes in a single transaction.
 	if err := e.CacheRepo.FlushTx(FlushOps{
+		UpsertSubscriptionRefresh: upsertRefresh, DeleteSubscriptionRefresh: deleteRefresh,
 		UpsertNodesStatic:       upsertStatic,
 		DeleteNodesStatic:       deleteStatic,
 		UpsertSubscriptionNodes: upsertSubNodes,

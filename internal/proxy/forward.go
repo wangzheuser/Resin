@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -321,6 +322,33 @@ func prepareForwardOutboundRequest(in *http.Request) *http.Request {
 	return req
 }
 
+const forwardRetryAttemptBudget = 8 * time.Second
+
+func forwardRequestReplaySafe(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return r.Body == nil || r.Body == http.NoBody
+	default:
+		return false
+	}
+}
+
+// canRetryForwardRequest reports whether the request can be sent to another
+// node without replaying a request body or a request that may have reached the
+// upstream. The proxy's high-cardinality callers primarily issue GET requests;
+// keeping this list explicit prevents accidental replay of writes.
+func canRetryForwardRequest(r *http.Request, trace *upstreamRequestTrace) bool {
+	// GotConn precedes any request write, including a partial failed write.
+	// Retrying only before it avoids replay when WroteRequest reports an error.
+	if r == nil || trace == nil || trace.gotConn.Load() {
+		return false
+	}
+	return forwardRequestReplaySafe(r)
+}
+
 func (p *ForwardProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	platName, account, authErr := p.authenticate(r)
 	if authErr != nil {
@@ -354,36 +382,56 @@ func (p *ForwardProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		transport = p.outboundHTTPTransport(routed)
 	}
-	outReq := prepareForwardOutboundRequest(r)
-	upstreamTrace := newUpstreamRequestTrace()
-	outReq = outReq.WithContext(httptrace.WithClientTrace(outReq.Context(), upstreamTrace.clientTrace()))
-	pendingEgressHeaderBytes := headerWireLen(outReq.Header)
-	var egressBodyCounter *countingReadCloser
-	if outReq.Body != nil && outReq.Body != http.NoBody {
-		egressBodyCounter = newCountingReadCloser(outReq.Body)
-		outReq.Body = egressBodyCounter
-	}
-
-	// Forward the request.
-	resp, err := transport.RoundTrip(outReq)
-	if upstreamTrace.shouldCommitEgress() {
-		lifecycle.addEgressBytes(pendingEgressHeaderBytes)
-		if egressBodyCounter != nil {
-			lifecycle.addEgressBytes(egressBodyCounter.Total())
+	var resp *http.Response
+	var err error
+	var upstreamTrace *upstreamRequestTrace
+	initialRoute := route
+	excludedEgressIPs := make(map[netip.Addr]struct{}, 1)
+	for attempt := 0; attempt < 2; attempt++ {
+		attemptCtx := r.Context()
+		if hasRoute && forwardRequestReplaySafe(r) {
+			// Bound only connection setup. The request context remains intact so
+			// a successful slow response or long-lived body is not truncated.
+			deadline := time.Now().Add(forwardRetryAttemptBudget)
+			if requested, ok := attemptCtx.Deadline(); ok && requested.Before(deadline) {
+				deadline = requested
+			}
+			attemptCtx = netutil.WithDialDeadline(attemptCtx, deadline)
 		}
-	}
-	if err != nil {
+		outReq := prepareForwardOutboundRequest(r).WithContext(attemptCtx)
+		upstreamTrace = newUpstreamRequestTrace()
+		outReq = outReq.WithContext(httptrace.WithClientTrace(outReq.Context(), upstreamTrace.clientTrace()))
+		pendingEgressHeaderBytes := headerWireLen(outReq.Header)
+		var egressBodyCounter *countingReadCloser
+		if outReq.Body != nil && outReq.Body != http.NoBody {
+			egressBodyCounter = newCountingReadCloser(outReq.Body)
+			outReq.Body = egressBodyCounter
+		}
+
+		resp, err = transport.RoundTrip(outReq)
+		if upstreamTrace.shouldCommitEgress() {
+			lifecycle.addEgressBytes(pendingEgressHeaderBytes)
+			if egressBodyCounter != nil {
+				lifecycle.addEgressBytes(egressBodyCounter.Total())
+			}
+		}
+		if err == nil {
+			if attempt > 0 {
+				succeeded := true
+				p.router.RecordRouteFailover(&succeeded)
+				logRouteFailover("success", initialRoute, route, r.Host, "")
+			}
+			break
+		}
+
 		proxyErr := classifyUpstreamError(err)
-		if proxyErr == nil {
+		if proxyErr == nil || errors.Is(r.Context().Err(), context.Canceled) {
 			// context.Canceled — skip health recording, close silently.
 			// Request ended due to client-side cancellation before upstream
 			// response; treat as net-ok in request log semantics.
 			lifecycle.setNetOK(true)
 			return
 		}
-		lifecycle.setProxyError(proxyErr)
-		lifecycle.setUpstreamError("forward_roundtrip", err)
-		lifecycle.setHTTPStatus(proxyErr.HTTPCode)
 		if hasRoute {
 			recordPassiveResultAsync(p.health, route, false)
 			detail := summarizeUpstreamError(err)
@@ -398,6 +446,34 @@ func (p *ForwardProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		if attempt == 0 && hasRoute && r.Context().Err() == nil && canRetryForwardRequest(r, upstreamTrace) {
+			excludedEgressIPs[route.EgressIP] = struct{}{}
+			p.router.RecordRouteFailover(nil)
+			logRouteFailover("retry", initialRoute, routing.RouteResult{}, r.Host, summarizeUpstreamError(err).Kind)
+			next, nextErr := resolveRoutedOutboundExcluding(
+				p.router, p.pool, platName, account, r.Host, excludedEgressIPs,
+			)
+			if nextErr == nil {
+				route = next.Route
+				transport = p.outboundHTTPTransport(next)
+				lifecycle.setRouteResult(route)
+				if p.health != nil {
+					go p.health.RecordLatency(route.NodeHash, netutil.ExtractDomain(r.Host), nil)
+				}
+				continue
+			}
+			failed := false
+			p.router.RecordRouteFailover(&failed)
+			logRouteFailover("failed", initialRoute, routing.RouteResult{}, r.Host, "route_unavailable")
+		}
+		if attempt > 0 {
+			failed := false
+			p.router.RecordRouteFailover(&failed)
+			logRouteFailover("failed", initialRoute, route, r.Host, summarizeUpstreamError(err).Kind)
+		}
+		lifecycle.setProxyError(proxyErr)
+		lifecycle.setUpstreamError("forward_roundtrip", err)
+		lifecycle.setHTTPStatus(proxyErr.HTTPCode)
 		writeProxyError(w, proxyErr)
 		return
 	}
@@ -533,8 +609,8 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 		lifecycle.setUpstreamError(relay.upstreamStage, relay.upstreamErr)
 	}
 	lifecycle.setNetOK(relay.netOK)
-	failureKind := summarizeUpstreamError(relay.upstreamErr).Kind
-	prepare.session.recordResult(relay.netOK, failureKind, !relay.netOK && relay.ingressBytes == 0)
+	detail := summarizeUpstreamError(relay.upstreamErr)
+	prepare.session.recordResult(relay.netOK, detail.Kind, !relay.netOK && shouldRecordTargetEgressFailure(detail))
 }
 
 // shouldRecordForwardCopyFailure decides whether an HTTP response body copy

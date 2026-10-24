@@ -106,8 +106,8 @@ func TestMigrateStateDB_LegacyBaselineAdvancesToLatest(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddSubscriptionRelayPlatform {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddSubscriptionRelayPlatform)
+	if version != stateVersionAddSubscriptionDownload {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddSubscriptionDownload)
 	}
 	if ok, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes"); err != nil || !ok {
 		t.Fatalf("expected migrated column subscriptions.incremental_alive_nodes, ok=%v err=%v", ok, err)
@@ -173,8 +173,8 @@ func TestMigrateStateDB_AddsIncrementalAliveNodesToLegacySubscriptions(t *testin
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddSubscriptionRelayPlatform {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddSubscriptionRelayPlatform)
+	if version != stateVersionAddSubscriptionDownload {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddSubscriptionDownload)
 	}
 	if ok, err := hasTableColumn(db, "platforms", "passive_circuit_breaker_disabled"); err != nil || !ok {
 		t.Fatalf("expected migrated column platforms.passive_circuit_breaker_disabled, ok=%v err=%v", ok, err)
@@ -248,8 +248,8 @@ func TestMigrateStateDB_NormalizesLegacyRandomMissAction(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddSubscriptionRelayPlatform {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddSubscriptionRelayPlatform)
+	if version != stateVersionAddSubscriptionDownload {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddSubscriptionDownload)
 	}
 	if ok, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes"); err != nil || !ok {
 		t.Fatalf("expected migrated column subscriptions.incremental_alive_nodes, ok=%v err=%v", ok, err)

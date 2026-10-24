@@ -12,6 +12,8 @@ import (
 	"github.com/Resinat/Resin/internal/node"
 )
 
+const maxProbeResponseBytes int64 = 1 << 20
+
 // DirectFetcher creates a Fetcher that performs direct HTTP requests
 // (not through a node outbound). This is mostly useful for tests or
 // fallback wiring.
@@ -54,9 +56,12 @@ func DirectFetcher(timeout func() time.Duration) Fetcher {
 		requestDone := time.Now()
 		defer resp.Body.Close()
 
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxProbeResponseBytes+1))
 		if err != nil {
 			return nil, 0, fmt.Errorf("probe: read body: %w", err)
+		}
+		if int64(len(body)) > maxProbeResponseBytes {
+			return nil, 0, fmt.Errorf("probe: response exceeds %d bytes", maxProbeResponseBytes)
 		}
 
 		// Prefer TLS handshake latency. If there is no handshake event (for

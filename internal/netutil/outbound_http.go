@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -75,6 +74,9 @@ type OutboundHTTPOptions struct {
 	RequireStatusOK bool
 	// UserAgent overrides the request User-Agent when non-empty.
 	UserAgent string
+	// MaxResponseBytes bounds buffered response bodies. Zero uses the shared
+	// default limit.
+	MaxResponseBytes int64
 	// OnConnLifecycle is called with open/close lifecycle events to track connection
 	// lifecycle for metrics. Set by probe callers to count outbound connections;
 	// left nil for download callers (GeoIP, subscription) to exclude from stats.
@@ -192,10 +194,10 @@ func httpGetWithClient(
 		}
 	}
 	if opts.RequireStatusOK && resp.StatusCode != http.StatusOK {
-		return nil, latency, fmt.Errorf("outbound fetch: unexpected status %d from %s", resp.StatusCode, url)
+		return nil, latency, &HTTPStatusError{StatusCode: resp.StatusCode, URL: url, RetryAfter: ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())}
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBoundedResponse(resp.Body, opts.MaxResponseBytes)
 	if err != nil {
 		return nil, latency, err
 	}

@@ -58,7 +58,7 @@ func HandleListSubscriptions(cp *service.ControlPlaneService) http.HandlerFunc {
 			writeServiceError(w, err)
 			return
 		}
-		if includeContent != nil && !*includeContent {
+		if includeContent == nil || !*includeContent {
 			for i := range subs {
 				subs[i].Content = ""
 			}
@@ -98,6 +98,13 @@ func HandleGetSubscription(cp *service.ControlPlaneService) http.HandlerFunc {
 		if err != nil {
 			writeServiceError(w, err)
 			return
+		}
+		includeContent, ok := parseBoolQueryOrWriteInvalid(w, r, "include_content")
+		if !ok {
+			return
+		}
+		if includeContent == nil || !*includeContent {
+			s.Content = ""
 		}
 		WriteJSON(w, http.StatusOK, s)
 	}
@@ -162,11 +169,47 @@ func HandleRefreshSubscription(cp *service.ControlPlaneService) http.HandlerFunc
 		if !ok {
 			return
 		}
-		if err := cp.RefreshSubscription(id); err != nil {
+		if err := cp.RefreshSubscriptionContext(r.Context(), id); err != nil {
 			writeServiceError(w, err)
 			return
 		}
 		WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}
+
+func HandleSubscriptionProbeStatus(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		WriteJSON(w, http.StatusOK, cp.SubscriptionProbeStatus())
+	}
+}
+
+func HandleStartSubscriptionProbe(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := requireUUIDPathParam(w, r, "id", "subscription_id")
+		if !ok {
+			return
+		}
+		job, err := cp.StartSubscriptionProbe(id)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusAccepted, job)
+	}
+}
+
+func HandleCancelSubscriptionProbe(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := requireUUIDPathParam(w, r, "job_id", "job_id")
+		if !ok {
+			return
+		}
+		job, err := cp.CancelSubscriptionProbe(id)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, job)
 	}
 }
 

@@ -1,4 +1,7 @@
 .git
+.env
+.env.*
+!.env.example
 .agents
 .codex-artifacts
 .local
@@ -14,3 +17,4 @@ webui/dist
 .vscode
 *.log
 .data/
+data/

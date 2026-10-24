@@ -4,9 +4,23 @@ import type {
   Subscription,
   SubscriptionCreateInput,
   SubscriptionUpdateInput,
+  SubscriptionProbeJob,
 } from "./types";
 
 const basePath = "/api/v1/subscriptions";
+export const subscriptionProbeKey = ["subscription-probe-job"];
+
+export function getSubscriptionProbeJob(): Promise<SubscriptionProbeJob | null> {
+  return apiRequest<SubscriptionProbeJob | null>(`${basePath}/probe-job`);
+}
+
+export function startSubscriptionProbe(id: string): Promise<SubscriptionProbeJob> {
+  return apiRequest<SubscriptionProbeJob>(`${basePath}/${id}/actions/probe-egress`, { method: "POST" });
+}
+
+export function cancelSubscriptionProbe(id: string): Promise<SubscriptionProbeJob> {
+  return apiRequest<SubscriptionProbeJob>(`${basePath}/probe-job/${id}`, { method: "DELETE" });
+}
 
 type ApiSubscription = Omit<Subscription, "last_checked" | "last_updated" | "last_error"> & {
   source_type?: "remote" | "local";
@@ -65,7 +79,7 @@ export async function listSubscriptions(input: ListSubscriptionsInput = {}): Pro
 }
 
 export async function getSubscription(id: string): Promise<Subscription> {
-  const data = await apiRequest<ApiSubscription>(`${basePath}/${id}`);
+  const data = await apiRequest<ApiSubscription>(`${basePath}/${id}?include_content=true`);
   return normalizeSubscription(data);
 }
 

@@ -31,6 +31,7 @@ func NewServer(
 	apiMaxBodyBytes int64,
 	requestlogRepo *requestlog.Repo,
 	metricsManager *metrics.Manager,
+	requestlogServices ...*requestlog.Service,
 ) *Server {
 	return NewServerWithAddress(
 		"",
@@ -43,6 +44,7 @@ func NewServer(
 		apiMaxBodyBytes,
 		requestlogRepo,
 		metricsManager,
+		requestlogServices...,
 	)
 }
 
@@ -58,6 +60,7 @@ func NewServerWithAddress(
 	apiMaxBodyBytes int64,
 	requestlogRepo *requestlog.Repo,
 	metricsManager *metrics.Manager,
+	requestlogServices ...*requestlog.Service,
 ) *Server {
 	mux := http.NewServeMux()
 
@@ -71,7 +74,7 @@ func NewServerWithAddress(
 	authed.Handle("GET /api/v1/system/info", HandleSystemInfo(systemInfo))
 	authed.Handle("GET /api/v1/system/config", HandleSystemConfig(runtimeCfg))
 	authed.Handle("GET /api/v1/system/config/default", HandleSystemDefaultConfig())
-	authed.Handle("GET /api/v1/system/config/env", HandleSystemEnvConfig(envCfg))
+	authed.Handle("GET /api/v1/system/config/env", HandleSystemEnvConfig(envCfg, requestlogServices...))
 
 	if cp != nil {
 		// System config mutations.
@@ -101,6 +104,9 @@ func NewServerWithAddress(
 		authed.Handle("PATCH /api/v1/subscriptions/{id}", HandleUpdateSubscription(cp))
 		authed.Handle("DELETE /api/v1/subscriptions/{id}", HandleDeleteSubscription(cp))
 		authed.Handle("POST /api/v1/subscriptions/{id}/actions/refresh", HandleRefreshSubscription(cp))
+		authed.Handle("GET /api/v1/subscriptions/probe-job", HandleSubscriptionProbeStatus(cp))
+		authed.Handle("POST /api/v1/subscriptions/{id}/actions/probe-egress", HandleStartSubscriptionProbe(cp))
+		authed.Handle("DELETE /api/v1/subscriptions/probe-job/{job_id}", HandleCancelSubscriptionProbe(cp))
 		authed.Handle("POST /api/v1/subscriptions/{id}/actions/cleanup-circuit-open-nodes", HandleCleanupSubscriptionCircuitOpenNodes(cp))
 
 		// Account header rules.

@@ -5,14 +5,42 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 )
+
+const defaultMaxResponseBytes int64 = 16 << 20
+
+// ResponseTooLargeError prevents a remote endpoint from growing the process
+// heap without a bound while a response is being buffered.
+type ResponseTooLargeError struct {
+	Limit int64
+}
+
+func (e *ResponseTooLargeError) Error() string {
+	return fmt.Sprintf("downloader: response exceeds %d bytes", e.Limit)
+}
+
+func readBoundedResponse(body io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxResponseBytes
+	}
+	data, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, &ResponseTooLargeError{Limit: maxBytes}
+	}
+	return data, nil
+}
 
 // HTTPStatusError indicates the server responded, but with an unexpected
 // HTTP status code. This is a non-network failure.
 type HTTPStatusError struct {
 	StatusCode int
 	URL        string
+	RetryAfter time.Duration
 }
 
 func (e *HTTPStatusError) Error() string {
@@ -41,9 +69,10 @@ type Downloader interface {
 
 // DirectDownloader downloads via a standard HTTP client (no proxy).
 type DirectDownloader struct {
-	Client      *http.Client
-	TimeoutFn   func() time.Duration
-	UserAgentFn func() string
+	Client           *http.Client
+	TimeoutFn        func() time.Duration
+	UserAgentFn      func() string
+	MaxResponseBytes int64
 }
 
 // NewDirectDownloader creates a downloader that pulls timeout/user-agent
@@ -94,14 +123,24 @@ func (d *DirectDownloader) Download(ctx context.Context, url string) ([]byte, er
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, &HTTPStatusError{StatusCode: resp.StatusCode, URL: url}
+		return nil, &HTTPStatusError{StatusCode: resp.StatusCode, URL: url, RetryAfter: ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())}
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBoundedResponse(resp.Body, d.MaxResponseBytes)
 	if err != nil {
 		return nil, fmt.Errorf("downloader: %w", err)
 	}
 	return body, nil
+}
+
+func ParseRetryAfter(value string, now time.Time) time.Duration {
+	if seconds, err := strconv.ParseInt(value, 10, 32); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if date, err := http.ParseTime(value); err == nil && date.After(now) {
+		return date.Sub(now)
+	}
+	return 0
 }
 
 func (d *DirectDownloader) currentTimeout() time.Duration {

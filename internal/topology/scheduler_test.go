@@ -1,6 +1,7 @@
 package topology
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -199,7 +200,7 @@ func TestScheduler_UpdateSubscription_FetchFailure(t *testing.T) {
 
 	sched.UpdateSubscription(sub)
 
-	if sub.GetLastError() != "network error" {
+	if sub.GetLastError() != "subscription download connection failure" {
 		t.Fatalf("expected 'network error', got %q", sub.GetLastError())
 	}
 	if sub.LastCheckedNs.Load() == 0 {
@@ -598,7 +599,7 @@ func TestScheduler_FailurePath_Serialized(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sched.UpdateSubscription(sub)
+			sched.updateSubscription(context.Background(), sub)
 		}()
 	}
 	wg.Wait()
@@ -606,7 +607,7 @@ func TestScheduler_FailurePath_Serialized(t *testing.T) {
 	if fetchCount.Load() != 20 {
 		t.Fatalf("expected 20 fetch attempts, got %d", fetchCount.Load())
 	}
-	if sub.GetLastError() != "fail" {
+	if sub.GetLastError() != "subscription download connection failure" {
 		t.Fatalf("expected 'fail' error, got %q", sub.GetLastError())
 	}
 }
@@ -637,7 +638,7 @@ func TestScheduler_StaleFailureDoesNotOverrideNewerSuccess(t *testing.T) {
 	done1 := make(chan struct{})
 	go func() {
 		defer close(done1)
-		sched.UpdateSubscription(sub) // older attempt: blocks in fetcher and eventually fails.
+		sched.updateSubscription(context.Background(), sub) // older attempt: blocks in fetcher and eventually fails.
 	}()
 
 	<-firstStarted
@@ -645,7 +646,7 @@ func TestScheduler_StaleFailureDoesNotOverrideNewerSuccess(t *testing.T) {
 	done2 := make(chan struct{})
 	go func() {
 		defer close(done2)
-		sched.UpdateSubscription(sub) // newer attempt: succeeds first.
+		sched.updateSubscription(context.Background(), sub) // newer attempt: succeeds first.
 	}()
 	<-done2
 
@@ -700,7 +701,7 @@ func TestScheduler_StaleSuccessDoesNotOverrideNewerSuccess(t *testing.T) {
 	done1 := make(chan struct{})
 	go func() {
 		defer close(done1)
-		sched.UpdateSubscription(sub) // older attempt: blocked in fetcher, then stale success
+		sched.updateSubscription(context.Background(), sub) // older attempt: blocked in fetcher, then stale success
 	}()
 
 	<-firstStarted
@@ -708,7 +709,7 @@ func TestScheduler_StaleSuccessDoesNotOverrideNewerSuccess(t *testing.T) {
 	done2 := make(chan struct{})
 	go func() {
 		defer close(done2)
-		sched.UpdateSubscription(sub) // newer attempt: success lands first
+		sched.updateSubscription(context.Background(), sub) // newer attempt: success lands first
 	}()
 	<-done2
 
@@ -878,8 +879,10 @@ func TestScheduler_Tick_UpdatesDueSubscriptionsInParallel(t *testing.T) {
 
 	select {
 	case <-done:
-		t.Fatal("tick should wait for in-flight due refreshes")
+		// The periodic scan must return while the bounded refresh workers run;
+		// otherwise one slow batch delays all later due checks.
 	default:
+		t.Fatal("tick should return without waiting for in-flight due refreshes")
 	}
 
 	close(releaseFetch)

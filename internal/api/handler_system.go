@@ -1,14 +1,18 @@
 package api
 
 import (
+	"github.com/Resinat/Resin/internal/netutil"
 	"net/http"
 	"sync/atomic"
 
 	"github.com/Resinat/Resin/internal/config"
+	"github.com/Resinat/Resin/internal/requestlog"
 	"github.com/Resinat/Resin/internal/service"
 )
 
 type systemEnvConfigResponse struct {
+	SubscriptionProxyConfigured                     bool            `json:"subscription_proxy_configured"`
+	SubscriptionProxyAddress                        string          `json:"subscription_proxy_address"`
 	CacheDir                                        string          `json:"cache_dir"`
 	StateDir                                        string          `json:"state_dir"`
 	LogDir                                          string          `json:"log_dir"`
@@ -30,13 +34,19 @@ type systemEnvConfigResponse struct {
 	NodeDNSUpstreams                                []string        `json:"node_dns_upstreams"`
 	ProxyTransportMaxIdleConns                      int             `json:"proxy_transport_max_idle_conns"`
 	ProxyTransportMaxIdleConnsPerHost               int             `json:"proxy_transport_max_idle_conns_per_host"`
+	ProxyTransportMaxTransports                     int             `json:"proxy_transport_max_transports"`
 	ProxyTransportIdleConnTimeout                   config.Duration `json:"proxy_transport_idle_conn_timeout"`
+	ProxyConnectIdleTimeout                         config.Duration `json:"proxy_connect_idle_timeout"`
+	ProxyConnectMaxLifetime                         config.Duration `json:"proxy_connect_max_lifetime"`
+	MaxInboundConnections                           int             `json:"max_inbound_connections"`
 	ProxyBypassRules                                []string        `json:"proxy_bypass_rules"`
 	RequestLogQueueSize                             int             `json:"request_log_queue_size"`
 	RequestLogQueueFlushBatchSize                   int             `json:"request_log_queue_flush_batch_size"`
 	RequestLogQueueFlushInterval                    config.Duration `json:"request_log_queue_flush_interval"`
 	RequestLogDBMaxMB                               int             `json:"request_log_db_max_mb"`
 	RequestLogDBRetainCount                         int             `json:"request_log_db_retain_count"`
+	RequestLogQueueDepth                            int             `json:"request_log_queue_depth"`
+	RequestLogDroppedCount                          uint64          `json:"request_log_dropped_count"`
 	MetricThroughputIntervalSeconds                 int             `json:"metric_throughput_interval_seconds"`
 	MetricThroughputRetentionSeconds                int             `json:"metric_throughput_retention_seconds"`
 	MetricBucketSeconds                             int             `json:"metric_bucket_seconds"`
@@ -79,9 +89,13 @@ func HandleSystemDefaultConfig() http.HandlerFunc {
 }
 
 // HandleSystemEnvConfig returns a handler for GET /api/v1/system/config/env.
-func HandleSystemEnvConfig(envCfg *config.EnvConfig) http.HandlerFunc {
+func HandleSystemEnvConfig(envCfg *config.EnvConfig, requestLogServices ...*requestlog.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		WriteJSON(w, http.StatusOK, systemEnvConfigSnapshot(envCfg))
+		var requestLogService *requestlog.Service
+		if len(requestLogServices) > 0 {
+			requestLogService = requestLogServices[0]
+		}
+		WriteJSON(w, http.StatusOK, systemEnvConfigSnapshot(envCfg, requestLogService))
 	}
 }
 
@@ -101,13 +115,24 @@ func HandlePatchSystemConfig(cp *service.ControlPlaneService) http.HandlerFunc {
 	}
 }
 
-func systemEnvConfigSnapshot(envCfg *config.EnvConfig) *systemEnvConfigResponse {
+func systemEnvConfigSnapshot(envCfg *config.EnvConfig, requestLogServices ...*requestlog.Service) *systemEnvConfigResponse {
 	if envCfg == nil {
 		return nil
 	}
 	adminTokenSet := envCfg.AdminToken != ""
 	proxyTokenSet := envCfg.ProxyToken != ""
+	var requestLogService *requestlog.Service
+	if len(requestLogServices) > 0 {
+		requestLogService = requestLogServices[0]
+	}
 	return &systemEnvConfigResponse{
+		SubscriptionProxyConfigured: envCfg.SubscriptionProxyURL != "",
+		SubscriptionProxyAddress: func() string {
+			if envCfg.SubscriptionProxyURL == "" {
+				return ""
+			}
+			return netutil.RedactURL(envCfg.SubscriptionProxyURL)
+		}(),
 		CacheDir:                              envCfg.CacheDir,
 		StateDir:                              envCfg.StateDir,
 		LogDir:                                envCfg.LogDir,
@@ -129,13 +154,19 @@ func systemEnvConfigSnapshot(envCfg *config.EnvConfig) *systemEnvConfigResponse 
 		NodeDNSUpstreams:                                append([]string(nil), envCfg.NodeDNSUpstreams...),
 		ProxyTransportMaxIdleConns:                      envCfg.ProxyTransportMaxIdleConns,
 		ProxyTransportMaxIdleConnsPerHost:               envCfg.ProxyTransportMaxIdleConnsPerHost,
+		ProxyTransportMaxTransports:                     envCfg.ProxyTransportMaxTransports,
 		ProxyTransportIdleConnTimeout:                   config.Duration(envCfg.ProxyTransportIdleConnTimeout),
+		ProxyConnectIdleTimeout:                         config.Duration(envCfg.ProxyConnectIdleTimeout),
+		ProxyConnectMaxLifetime:                         config.Duration(envCfg.ProxyConnectMaxLifetime),
+		MaxInboundConnections:                           envCfg.MaxInboundConnections,
 		ProxyBypassRules:                                append([]string(nil), envCfg.ProxyBypassRules...),
 		RequestLogQueueSize:                             envCfg.RequestLogQueueSize,
 		RequestLogQueueFlushBatchSize:                   envCfg.RequestLogQueueFlushBatchSize,
 		RequestLogQueueFlushInterval:                    config.Duration(envCfg.RequestLogQueueFlushInterval),
 		RequestLogDBMaxMB:                               envCfg.RequestLogDBMaxMB,
 		RequestLogDBRetainCount:                         envCfg.RequestLogDBRetainCount,
+		RequestLogQueueDepth:                            requestLogService.QueueDepth(),
+		RequestLogDroppedCount:                          requestLogService.DroppedCount(),
 		MetricThroughputIntervalSeconds:                 envCfg.MetricThroughputIntervalSeconds,
 		MetricThroughputRetentionSeconds:                envCfg.MetricThroughputRetentionSeconds,
 		MetricBucketSeconds:                             envCfg.MetricBucketSeconds,

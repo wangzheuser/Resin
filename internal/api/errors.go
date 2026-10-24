@@ -51,6 +51,12 @@ func writeServiceError(w http.ResponseWriter, err error) {
 			status = http.StatusBadRequest
 		case "NOT_FOUND":
 			status = http.StatusNotFound
+		case "SUBSCRIPTION_FETCH_FAILED", "SUBSCRIPTION_PARSE_FAILED":
+			status = http.StatusBadGateway
+		case "SUBSCRIPTION_FETCH_TIMEOUT":
+			status = http.StatusGatewayTimeout
+		case "SUBSCRIPTION_NO_ROUTE":
+			status = http.StatusServiceUnavailable
 		case "CONFLICT":
 			status = http.StatusConflict
 		default:
